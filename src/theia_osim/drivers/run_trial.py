@@ -27,6 +27,7 @@ from ..import_pipeline.recipe_a_trc import write_recipe_a_trc
 from ..import_pipeline.recipe_c_sto import write_recipe_c_sto
 from ..analysis.scale import write_static_trc_from_first_frame
 from ..c3d_io.mdh_parser import parse_mdh
+from ..kinematics_postprocess.cardan_from_4x4 import write_recipe_d_mot
 from ..kinematics_postprocess.filter import lowpass_filtfilt
 from ..model_build.add_markers import add_virtual_markers
 from ..model_build.personalize import personalize_model
@@ -59,8 +60,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--recipes",
         type=str,
-        default="a,c",
-        help="Comma-separated list of recipes to run: a, c (default: a,c)",
+        default="a,c,d",
+        help="Comma-separated list of recipes to run: "
+             "a (marker IK), c (IMU IK), d (V3D-style analytical, no IK). "
+             "Default: a,c,d",
     )
     p.add_argument("--side", type=str, choices=["auto", "R", "L"], default=None)
     p.add_argument(
@@ -189,6 +192,35 @@ def main(argv: list[str] | None = None) -> int:
         summary["recipes"]["a"] = {
             "trc": str(trc_path),
             "ik_mot": str(mot_path),
+            "body_kin_vel": str(bk["vel"]),
+            "peak_pelvis_omega_y_dps": peak_y,
+            "peak_pelvis_omega_y_time_s": peak_y_t,
+        }
+
+    # 3b. Recipe D — Path A: analytical kinematics from Theia 4×4s, no IK
+    if "d" in recipes:
+        print(f"\n=> Recipe D (analytical kinematics, V3D-style, no IK)")
+        mot_path = out_root / "recipe_d" / "analytical.mot"
+        write_recipe_d_mot(trial.transforms, mot_path, trial.sample_rate_hz)
+        bk = run_body_kinematics(
+            markered_osim, mot_path, out_root / "recipe_d" / "body_kin",
+            bodies=("pelvis",),
+        )
+        df = read_body_velocities(bk["vel"], "pelvis")
+        omega = np.column_stack([df["omega_x"], df["omega_y"], df["omega_z"]])
+        omega_filt = lowpass_filtfilt(
+            omega, cutoff_hz=cfg.filters.ik_lowpass_hz,
+            sample_rate_hz=trial.sample_rate_hz,
+            order=cfg.filters.butterworth_order,
+        )
+        pelvis_omega["d"] = omega_filt
+        pelvis_time["d"] = df["time"].to_numpy()
+        peak_y = float(np.abs(omega_filt[:, 1]).max())
+        peak_y_idx = int(np.abs(omega_filt[:, 1]).argmax())
+        peak_y_t = float(df["time"].iloc[peak_y_idx])
+        print(f"   peak |pelvis ω_y| = {peak_y:.1f} deg/s at t={peak_y_t:.3f}s")
+        summary["recipes"]["d"] = {
+            "mot": str(mot_path),
             "body_kin_vel": str(bk["vel"]),
             "peak_pelvis_omega_y_dps": peak_y,
             "peak_pelvis_omega_y_time_s": peak_y_t,

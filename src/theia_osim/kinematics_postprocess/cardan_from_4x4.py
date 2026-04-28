@@ -1,0 +1,283 @@
+"""Path A — V3D-style analytical kinematics: compute OpenSim joint coordinates
+directly from Theia segment 4×4s, skipping IK entirely.
+
+V3D's Theia workflow (verified against C-Motion docs) tracks each segment
+INDEPENDENTLY from its 4×4 rotation matrix — no kinematic-tree IK fit.
+Joint angles are computed AFTER tracking as relative orientations between
+adjacent segments. This module replicates that approach for OpenSim.
+
+For every joint in the model:
+  R_relative = (R_parent_world)^T @ R_child_world      # body-frame relative
+  decompose R_relative into the joint's coordinate convention:
+    - CustomJoint (3-DOF, Cardan Z-X-Y): scipy as_euler('ZXY')
+    - PinJoint (1-DOF): axis-angle projection onto the joint axis
+
+Output: an OpenSim .mot containing all coordinate trajectories — drop-in
+replacement for IK output.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import opensim as osim
+import pandas as pd
+from scipy.spatial.transform import Rotation
+
+
+# Theia segment → OpenSim body name (skipping ones with no 4×4 source).
+THEIA_TO_BODY: dict[str, str] = {
+    "pelvis": "pelvis",
+    "torso": "torso",
+    "r_thigh": "femur_r",
+    "l_thigh": "femur_l",
+    "r_shank": "tibia_r",
+    "l_shank": "tibia_l",
+    "r_foot": "calcn_r",
+    "l_foot": "calcn_l",
+    "r_toes": "toes_r",
+    "l_toes": "toes_l",
+    "r_uarm": "humerus_r",
+    "l_uarm": "humerus_l",
+    "r_larm": "ulna_r",
+    "l_larm": "ulna_l",
+    "r_hand": "hand_r",
+    "l_hand": "hand_l",
+}
+
+BODY_TO_THEIA: dict[str, str] = {v: k for k, v in THEIA_TO_BODY.items()}
+
+
+@dataclass(frozen=True)
+class JointDef:
+    name: str           # OpenSim joint name
+    parent_body: str    # OpenSim body name (or "ground")
+    child_body: str
+    coords: tuple[str, ...]  # coordinate names in order
+    kind: str           # "free", "custom_zxy", "pin_x", "pin_y", "pin_z", "weld", "skip"
+
+
+# Joint definitions for LaiUhlrich2022. Verified by inspecting model:
+# CustomJoints with rot axes (Z, X, Y) → intrinsic Cardan ZXY decomposition.
+JOINT_DEFS: dict[str, JointDef] = {
+    # 6-DOF root: 3 rotations (ZXY) + 3 translations
+    "ground_pelvis": JointDef(
+        "ground_pelvis", "ground", "pelvis",
+        ("pelvis_tilt", "pelvis_list", "pelvis_rotation",
+         "pelvis_tx", "pelvis_ty", "pelvis_tz"),
+        "free",
+    ),
+    # 3-DOF spherical-equivalent
+    "hip_r": JointDef(
+        "hip_r", "pelvis", "femur_r",
+        ("hip_flexion_r", "hip_adduction_r", "hip_rotation_r"), "custom_zxy"),
+    "hip_l": JointDef(
+        "hip_l", "pelvis", "femur_l",
+        ("hip_flexion_l", "hip_adduction_l", "hip_rotation_l"), "custom_zxy"),
+    "back": JointDef(
+        "back", "pelvis", "torso",
+        ("lumbar_extension", "lumbar_bending", "lumbar_rotation"), "custom_zxy"),
+    "acromial_r": JointDef(
+        "acromial_r", "torso", "humerus_r",
+        ("arm_flex_r", "arm_add_r", "arm_rot_r"), "custom_zxy"),
+    "acromial_l": JointDef(
+        "acromial_l", "torso", "humerus_l",
+        # L arm has sign-flipped X and Y axes; we negate after ZXY decompose
+        ("arm_flex_l", "arm_add_l", "arm_rot_l"), "custom_zxy_l"),
+
+    # 1-DOF pin / coupled — use primary axis only
+    # walker_knee is coupled; we treat as a single rotation about model-default
+    "walker_knee_r": JointDef(
+        "walker_knee_r", "femur_r", "tibia_r",
+        ("knee_angle_r",), "pin_x"),
+    "walker_knee_l": JointDef(
+        "walker_knee_l", "femur_l", "tibia_l",
+        ("knee_angle_l",), "pin_x"),
+    "ankle_r": JointDef(
+        "ankle_r", "tibia_r", "calcn_r", ("ankle_angle_r",), "pin_z"),
+    "ankle_l": JointDef(
+        "ankle_l", "tibia_l", "calcn_l", ("ankle_angle_l",), "pin_z"),
+    "subtalar_r": JointDef(
+        "subtalar_r", "calcn_r", "calcn_r",  # same body — see note below
+        ("subtalar_angle_r",), "skip"),
+    "subtalar_l": JointDef(
+        "subtalar_l", "calcn_l", "calcn_l", ("subtalar_angle_l",), "skip"),
+    "mtp_r": JointDef(
+        "mtp_r", "calcn_r", "toes_r", ("mtp_angle_r",), "pin_z"),
+    "mtp_l": JointDef(
+        "mtp_l", "calcn_l", "toes_l", ("mtp_angle_l",), "pin_z"),
+
+    "elbow_r": JointDef(
+        "elbow_r", "humerus_r", "ulna_r", ("elbow_flex_r",), "pin_z"),
+    "elbow_l": JointDef(
+        "elbow_l", "humerus_l", "ulna_l", ("elbow_flex_l",), "pin_z"),
+    "radioulnar_r": JointDef(
+        "radioulnar_r", "ulna_r", "ulna_r",  # forearm rotation, no separate Theia segment
+        ("pro_sup_r",), "skip"),
+    "radioulnar_l": JointDef(
+        "radioulnar_l", "ulna_l", "ulna_l", ("pro_sup_l",), "skip"),
+
+    # Coupled patellofemoral and welded radius_hand have no independent kinematics
+    "patellofemoral_r": JointDef(
+        "patellofemoral_r", "femur_r", "femur_r", ("knee_angle_r_beta",), "skip"),
+    "patellofemoral_l": JointDef(
+        "patellofemoral_l", "femur_l", "femur_l", ("knee_angle_l_beta",), "skip"),
+}
+
+
+def _relative_rotation(R_parent: np.ndarray, R_child: np.ndarray) -> np.ndarray:
+    """Per-frame R_rel = R_parent.T @ R_child. Inputs (T, 3, 3); output (T, 3, 3)."""
+    return np.einsum("nji,njk->nik", R_parent, R_child)
+
+
+def _theia_to_opensim_world_R(R: np.ndarray) -> np.ndarray:
+    """Convert Theia world rotation submatrix to OpenSim-world orientation.
+
+    Theia/VLB world is Z-up; OpenSim default is Y-up. We left-multiply by
+    Rx(-90°) to swap frames (same convention used by recipe_a_trc and
+    recipe_c_sto).
+    """
+    Rx_neg90 = Rotation.from_euler("x", -90, degrees=True).as_matrix()
+    return np.einsum("ij,njk->nik", Rx_neg90, R)
+
+
+def _unwrap_deg(x: np.ndarray) -> np.ndarray:
+    """Unwrap an angular time series (in degrees) at 360° discontinuities."""
+    return np.degrees(np.unwrap(np.radians(x)))
+
+
+def compute_coordinates(
+    transforms_by_segment: dict[str, np.ndarray],
+    sample_rate_hz: float,
+    *,
+    osim_axis_swap: bool = True,
+    unwrap: bool = True,
+) -> pd.DataFrame:
+    """Compute every OpenSim joint coordinate for every frame of the trial.
+
+    Args:
+        transforms_by_segment: TrialData.transforms (slope-corrected).
+        sample_rate_hz: trial sample rate.
+        osim_axis_swap: apply Rx(-90°) to map Theia Z-up → OpenSim Y-up.
+
+    Returns:
+        DataFrame with columns: time + every coordinate name in JOINT_DEFS.
+    """
+    if not transforms_by_segment:
+        raise ValueError("no transforms")
+
+    n_frames = next(iter(transforms_by_segment.values())).shape[0]
+    times = np.arange(n_frames, dtype=np.float64) / sample_rate_hz
+
+    # Pull per-body world rotations + positions (with optional axis swap).
+    Rs: dict[str, np.ndarray] = {}
+    ps: dict[str, np.ndarray] = {}
+    for body, theia_seg in BODY_TO_THEIA.items():
+        if theia_seg not in transforms_by_segment:
+            continue
+        T = transforms_by_segment[theia_seg]
+        R = T[:, :3, :3]
+        p = T[:, :3, 3]
+        if osim_axis_swap:
+            R = _theia_to_opensim_world_R(R)
+            # Apply same Rx(-90°) to position vector
+            Rx = Rotation.from_euler("x", -90, degrees=True).as_matrix()
+            p = np.einsum("ij,nj->ni", Rx, p)
+        Rs[body] = R
+        ps[body] = p
+
+    out: dict[str, np.ndarray] = {"time": times}
+
+    for joint_name, jdef in JOINT_DEFS.items():
+        if jdef.kind == "skip":
+            for c in jdef.coords:
+                out[c] = np.zeros(n_frames)
+            continue
+
+        if jdef.kind == "free":
+            # Pelvis vs ground: rotation = pelvis world R, translation = pelvis world p
+            R_rel = Rs["pelvis"]
+            # Cardan ZXY decomposition of R itself (parent is ground = identity)
+            angles_zxy = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
+            tilt, list_, rotation = (
+                angles_zxy[:, 0], angles_zxy[:, 1], angles_zxy[:, 2],
+            )
+            tx, ty, tz = ps["pelvis"][:, 0], ps["pelvis"][:, 1], ps["pelvis"][:, 2]
+            out[jdef.coords[0]] = tilt
+            out[jdef.coords[1]] = list_
+            out[jdef.coords[2]] = rotation
+            out[jdef.coords[3]] = tx
+            out[jdef.coords[4]] = ty
+            out[jdef.coords[5]] = tz
+            continue
+
+        if jdef.parent_body not in Rs or jdef.child_body not in Rs:
+            for c in jdef.coords:
+                out[c] = np.zeros(n_frames)
+            continue
+
+        R_rel = _relative_rotation(Rs[jdef.parent_body], Rs[jdef.child_body])
+
+        if jdef.kind == "custom_zxy":
+            ang = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
+            for i, c in enumerate(jdef.coords):
+                out[c] = ang[:, i]
+        elif jdef.kind == "custom_zxy_l":
+            # acromial_l: axis2=-X, axis3=-Y → negate angles 1 and 2
+            ang = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
+            out[jdef.coords[0]] = ang[:, 0]
+            out[jdef.coords[1]] = -ang[:, 1]
+            out[jdef.coords[2]] = -ang[:, 2]
+        elif jdef.kind in ("pin_x", "pin_y", "pin_z"):
+            # Project relative rotation onto the joint's primary axis.
+            axis_idx = {"pin_x": 0, "pin_y": 1, "pin_z": 2}[jdef.kind]
+            ang = Rotation.from_matrix(R_rel).as_euler("XYZ", degrees=True)
+            out[jdef.coords[0]] = ang[:, axis_idx]
+
+    # Unwrap rotational coordinates so BodyKinematics doesn't see 360° jumps.
+    if unwrap:
+        for col in list(out.keys()):
+            if col == "time":
+                continue
+            # Only unwrap rotational coords (translations are pelvis_tx/ty/tz).
+            if col in ("pelvis_tx", "pelvis_ty", "pelvis_tz"):
+                continue
+            out[col] = _unwrap_deg(np.asarray(out[col]))
+
+    return pd.DataFrame(out)
+
+
+def write_mot(coords: pd.DataFrame, path: Path | str) -> Path:
+    """Write a DataFrame of OpenSim joint coordinates to a .mot file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n_rows = len(coords)
+    n_cols = len(coords.columns)
+
+    lines: list[str] = []
+    lines.append(f"Coordinates")
+    lines.append(f"version=1")
+    lines.append(f"nRows={n_rows}")
+    lines.append(f"nColumns={n_cols}")
+    lines.append(f"inDegrees=yes")
+    lines.append(f"endheader")
+    lines.append("\t".join(coords.columns))
+    for _, row in coords.iterrows():
+        lines.append("\t".join(f"{v:.6f}" for v in row.values))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def write_recipe_d_mot(
+    transforms_by_segment: dict[str, np.ndarray],
+    out_mot: Path | str,
+    sample_rate_hz: float,
+    *,
+    osim_axis_swap: bool = True,
+) -> Path:
+    """End-to-end Path A: compute coords from Theia 4×4s + write OpenSim .mot."""
+    coords = compute_coordinates(
+        transforms_by_segment, sample_rate_hz, osim_axis_swap=osim_axis_swap
+    )
+    return write_mot(coords, out_mot)
