@@ -27,6 +27,8 @@ from ..import_pipeline.recipe_a_trc import write_recipe_a_trc
 from ..import_pipeline.recipe_c_sto import write_recipe_c_sto
 from ..kinematics_postprocess.filter import lowpass_filtfilt
 from ..model_build.add_markers import add_virtual_markers
+from ..validation.compare import compare_pelvis_omega
+from ..validation.load_v3d_json import load_v3d_procdb
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -58,6 +60,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated list of recipes to run: a, c (default: a,c)",
     )
     p.add_argument("--side", type=str, choices=["auto", "R", "L"], default=None)
+    p.add_argument(
+        "--v3d-procdb",
+        type=Path,
+        default=None,
+        help="Optional V3D procdb JSON for ground-truth comparison",
+    )
     return p.parse_args(argv)
 
 
@@ -180,7 +188,47 @@ def main(argv: list[str] | None = None) -> int:
         print(f"   pelvis ω RMSE (deg/s, mean over xyz): {rmse:.2f}")
         summary["a_vs_c_rmse_dps"] = rmse
 
-    # 6. Plot
+    # 6. V3D comparison if reference available
+    if args.v3d_procdb is not None and args.v3d_procdb.exists():
+        print(f"\n=> V3D comparison ({args.v3d_procdb.name})")
+        v3d = load_v3d_procdb(args.v3d_procdb)
+        print(
+            f"   V3D info: HAND={v3d.info.get('HAND')}, "
+            f"PITCH_VELO={v3d.info.get('PITCH_VELO')}, QA={v3d.info.get('QA')}"
+        )
+        v3d_peaks = v3d.metrics.get("PELVIS_ANGULAR_VELOCITY_MAX", {})
+        if v3d_peaks:
+            print(f"   V3D PELVIS_ANGULAR_VELOCITY_MAX: {v3d_peaks}")
+        summary["v3d"] = {
+            "info": v3d.info,
+            "events": v3d.events,
+            "pelvis_angular_velocity_max": v3d_peaks,
+            "comparisons": {},
+        }
+        for r in pelvis_omega:
+            sto = (
+                out_root / f"recipe_{r}" / "body_kin"
+                / "body_kinematics_BodyKinematics_vel_bodyLocal.sto"
+            )
+            if not sto.exists():
+                continue
+            rep = compare_pelvis_omega(v3d, sto, out_dir=out_root, label=f"recipe_{r}")
+            print(f"   recipe {r.upper()} vs V3D — peaks XYZ:")
+            print(f"     V3D    : {rep.v3d_peak_xyz}")
+            print(f"     OpenSim: {rep.osim_peak_xyz}")
+            print(f"     RMSE   : x={rep.rmse_xyz[0]:.1f}  y={rep.rmse_xyz[1]:.1f}  z={rep.rmse_xyz[2]:.1f} deg/s")
+            print(f"     overlay: {rep.overlay_png.name}")
+            summary["v3d"]["comparisons"][r] = {
+                "v3d_peak_xyz": rep.v3d_peak_xyz,
+                "osim_peak_xyz": rep.osim_peak_xyz,
+                "rmse_xyz": rep.rmse_xyz,
+                "mae_xyz": rep.mae_xyz,
+                "n_aligned_frames": rep.n_aligned_frames,
+                "overlay_png": str(rep.overlay_png),
+                "raw_csv": str(rep.raw_csv),
+            }
+
+    # 7. Plot
     plot_path = out_root / "pelvis_angular_velocity.png"
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
     axis_labels = ["ω_x (sagittal-ish)", "ω_y (long axis = pelvis rotation)", "ω_z (lateral-ish)"]
@@ -203,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     plt.close(fig)
     print(f"\n=> plot saved: {plot_path}")
 
-    # 7. Write summary
+    # 8. Write summary
     summary_path = out_root / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str))
     print(f"=> summary: {summary_path}")
