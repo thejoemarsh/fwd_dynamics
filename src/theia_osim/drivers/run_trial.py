@@ -25,6 +25,11 @@ from ..config import Config, load_config
 from ..import_pipeline.landmarks import load_marker_catalog
 from ..import_pipeline.recipe_a_trc import write_recipe_a_trc
 from ..import_pipeline.recipe_c_sto import write_recipe_c_sto
+from ..analysis.scale import (
+    compute_scale_factors,
+    run_scale,
+    write_static_trc_from_first_frame,
+)
 from ..kinematics_postprocess.filter import lowpass_filtfilt
 from ..model_build.add_markers import add_virtual_markers
 from ..validation.compare import compare_pelvis_omega
@@ -66,6 +71,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional V3D procdb JSON for ground-truth comparison",
     )
+    p.add_argument(
+        "--scale", action="store_true",
+        help="Run ScaleTool to scale the model to subject anthropometry before IK",
+    )
+    p.add_argument(
+        "--subject-mass-kg", type=float, default=85.0,
+        help="Subject mass in kg (used by ScaleTool for mass redistribution; default 85)",
+    )
+    p.add_argument(
+        "--subject-height-m", type=float, default=1.85,
+        help="Subject height in m (informational; default 1.85)",
+    )
     return p.parse_args(argv)
 
 
@@ -93,6 +110,26 @@ def main(argv: list[str] | None = None) -> int:
     add_virtual_markers(args.src_model, args.markers, markered_osim)
     print(f"   markered model: {markered_osim.relative_to(out_root.parent.parent)}")
 
+    # 2b. Scale model to subject (optional)
+    if args.scale:
+        print(
+            f"\n=> Scaling model (mass={args.subject_mass_kg}kg, "
+            f"height={args.subject_height_m}m)"
+        )
+        factors, lengths = compute_scale_factors(trial)
+        for body, f in factors.items():
+            print(f"   {body:14s}  ratio={f[0]:.4f}  subj_len={lengths[body]:.4f}m")
+        static_trc = out_root / "static.trc"
+        write_static_trc_from_first_frame(trial, args.markers, static_trc)
+        scaled_osim = out_root / "theia_pitching_scaled.osim"
+        scale_report = run_scale(
+            markered_osim, trial, static_trc, scaled_osim,
+            subject_mass_kg=args.subject_mass_kg,
+            subject_height_m=args.subject_height_m,
+        )
+        markered_osim = scale_report.scaled_model_path
+        print(f"   scaled model: {markered_osim.name}")
+
     summary: dict = {
         "trial": str(args.c3d),
         "n_frames": trial.n_frames,
@@ -100,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         "theia_version": list(trial.meta.theia_version),
         "filt_freq_hz": trial.meta.filt_freq_hz,
         "ik_lowpass_hz": cfg.filters.ik_lowpass_hz,
+        "scaled": bool(args.scale),
+        "subject_mass_kg": args.subject_mass_kg if args.scale else None,
+        "subject_height_m": args.subject_height_m if args.scale else None,
         "recipes": {},
     }
 
