@@ -1,0 +1,36 @@
+# Default pipeline config.
+# Override per-facility by copying to e.g. configs/seattle.yaml and editing.
+
+filters:
+  theia_lowpass_hz: 30          # informational; pre-applied by Theia
+  ik_lowpass_hz: 20             # bidirectional Butterworth on IK output (matches V3D)
+  butterworth_order: 4          # 2nd-order forward + backward = 4th-order zero-phase
+
+slope:
+  vlb_4x4:                      # Lab → VLB rotation; ~4.76° mound slope
+    - [0,    0.9965, -0.0831, 0]
+    - [-1,   0,       0,      0]
+    - [0,    0.0831,  0.9965, 0]
+    - [0,    0,       0,      1]
+  apply_at: c3d_load            # one of: c3d_load | post_ik | model_ground
+
+sample_rate:
+  source: auto                  # read from c3d POINT.RATE
+  supported: [250, 300, 360]
+
+anthropometrics:
+  source: theia                 # use THEIA3D group; fallback de_leva
+  override_mass_kg: null
+  override_height_m: null
+
+paths:
+  models_dir: data/models
+  output_root: out
+
+recipes:
+  enabled: [a, c]
+  primary: a                    # canonical; c is validator
+
+throwing_side: auto             # auto | R | L
+
+ignored_segments: [pelvis_shifted, worldbody]   # v2025.x duplicate

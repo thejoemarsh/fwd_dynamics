@@ -1,0 +1,57 @@
+# Virtual-marker catalog (Recipe A).
+# Each Theia segment gets >=3 non-collinear markers in segment-local coordinates.
+# The 4×4 origin (0,0,0) is always the proximal joint center — emitted as
+# `<segment>_origin`. Two more markers per segment constrain orientation.
+#
+# `body` is the OpenSim body these markers attach to (constants.py THEIA_TO_OSIM_BODY).
+# `local_xyz` is the marker location in the THEIA segment frame (meters).
+#
+# After `model_build/add_markers.py` runs, every entry here exists as a <Marker>
+# tag on the OpenSim model. The corresponding world-space positions are written
+# to a TRC by `import_pipeline/recipe_a_trc.py` for IK to track.
+#
+# M1 subset: only segments needed for pelvis angular velocity (pelvis, torso,
+# both thighs, both shanks). Full catalog backfilled in M1.5.
+
+markers:
+  pelvis:
+    body: pelvis
+    landmarks:
+      - { name: pelvis_origin, local_xyz: [0.00, 0.00, 0.00] }
+      - { name: pelvis_lat,    local_xyz: [0.00, 0.10, 0.00] }
+      - { name: pelvis_ant,    local_xyz: [0.08, 0.00, 0.00] }
+
+  torso:
+    body: torso
+    landmarks:
+      - { name: torso_origin,  local_xyz: [0.00, 0.00, 0.00] }
+      - { name: torso_lat,     local_xyz: [0.00, 0.18, 0.00] }
+      - { name: torso_ant,     local_xyz: [0.10, 0.00, 0.20] }
+
+  r_thigh:
+    body: femur_r
+    landmarks:
+      - { name: r_thigh_origin,    local_xyz: [0.00,  0.00,  0.00] }
+      - { name: r_thigh_dist_lat,  local_xyz: [0.00,  0.04, -0.39] }
+      - { name: r_thigh_dist_med,  local_xyz: [0.00, -0.04, -0.39] }
+
+  l_thigh:
+    body: femur_l
+    landmarks:
+      - { name: l_thigh_origin,    local_xyz: [0.00,  0.00,  0.00] }
+      - { name: l_thigh_dist_lat,  local_xyz: [0.00, -0.04, -0.39] }
+      - { name: l_thigh_dist_med,  local_xyz: [0.00,  0.04, -0.39] }
+
+  r_shank:
+    body: tibia_r
+    landmarks:
+      - { name: r_shank_origin,    local_xyz: [0.00,  0.00,  0.00] }
+      - { name: r_shank_dist_lat,  local_xyz: [0.00,  0.03, -0.42] }
+      - { name: r_shank_dist_med,  local_xyz: [0.00, -0.03, -0.42] }
+
+  l_shank:
+    body: tibia_l
+    landmarks:
+      - { name: l_shank_origin,    local_xyz: [0.00,  0.00,  0.00] }
+      - { name: l_shank_dist_lat,  local_xyz: [0.00, -0.03, -0.42] }
+      - { name: l_shank_dist_med,  local_xyz: [0.00,  0.03, -0.42] }
