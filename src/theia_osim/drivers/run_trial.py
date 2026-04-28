@@ -25,13 +25,11 @@ from ..config import Config, load_config
 from ..import_pipeline.landmarks import load_marker_catalog
 from ..import_pipeline.recipe_a_trc import write_recipe_a_trc
 from ..import_pipeline.recipe_c_sto import write_recipe_c_sto
-from ..analysis.scale import (
-    compute_scale_factors,
-    run_scale,
-    write_static_trc_from_first_frame,
-)
+from ..analysis.scale import write_static_trc_from_first_frame
+from ..c3d_io.mdh_parser import parse_mdh
 from ..kinematics_postprocess.filter import lowpass_filtfilt
 from ..model_build.add_markers import add_virtual_markers
+from ..model_build.personalize import personalize_model
 from ..validation.compare import compare_pelvis_omega
 from ..validation.load_v3d_json import load_v3d_procdb
 
@@ -72,16 +70,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional V3D procdb JSON for ground-truth comparison",
     )
     p.add_argument(
-        "--scale", action="store_true",
-        help="Run ScaleTool to scale the model to subject anthropometry before IK",
+        "--mdh", type=Path, default=None,
+        help="V3D .mdh model file (supplies mass, height, segment lengths). "
+             "Triggers V3D-style personalization automatically.",
     )
     p.add_argument(
-        "--subject-mass-kg", type=float, default=85.0,
-        help="Subject mass in kg (used by ScaleTool for mass redistribution; default 85)",
+        "--subject-mass-kg", type=float, default=None,
+        help="Override subject mass (kg). Required if --mdh not provided and "
+             "personalization desired.",
     )
     p.add_argument(
-        "--subject-height-m", type=float, default=1.85,
-        help="Subject height in m (informational; default 1.85)",
+        "--subject-height-m", type=float, default=None,
+        help="Override subject height (m).",
     )
     return p.parse_args(argv)
 
@@ -110,25 +110,32 @@ def main(argv: list[str] | None = None) -> int:
     add_virtual_markers(args.src_model, args.markers, markered_osim)
     print(f"   markered model: {markered_osim.relative_to(out_root.parent.parent)}")
 
-    # 2b. Scale model to subject (optional)
-    if args.scale:
-        print(
-            f"\n=> Scaling model (mass={args.subject_mass_kg}kg, "
-            f"height={args.subject_height_m}m)"
-        )
-        factors, lengths = compute_scale_factors(trial)
-        for body, f in factors.items():
-            print(f"   {body:14s}  ratio={f[0]:.4f}  subj_len={lengths[body]:.4f}m")
+    # 2b. Personalize model (V3D-style: scale geometry + de Leva mass/inertia)
+    do_personalize = (
+        args.mdh is not None
+        or (args.subject_mass_kg is not None and args.subject_height_m is not None)
+    )
+    personalize_report = None
+    if do_personalize:
+        mdh = parse_mdh(args.mdh) if args.mdh else None
+        mass = args.subject_mass_kg or (mdh.mass_kg if mdh else None)
+        height = args.subject_height_m or (mdh.height_m if mdh else None)
+        if mass is None or height is None:
+            raise SystemExit("--mdh missing values; provide --subject-mass-kg/--subject-height-m")
+        print(f"\n=> Personalizing (mass={mass}kg, height={height}m, mdh={args.mdh})")
         static_trc = out_root / "static.trc"
         write_static_trc_from_first_frame(trial, args.markers, static_trc)
-        scaled_osim = out_root / "theia_pitching_scaled.osim"
-        scale_report = run_scale(
-            markered_osim, trial, static_trc, scaled_osim,
-            subject_mass_kg=args.subject_mass_kg,
-            subject_height_m=args.subject_height_m,
+        personalized_osim = out_root / "theia_pitching_personalized.osim"
+        personalize_report = personalize_model(
+            markered_osim, trial, static_trc, personalized_osim,
+            subject_mass_kg=float(mass), subject_height_m=float(height), mdh=mdh,
         )
-        markered_osim = scale_report.scaled_model_path
-        print(f"   scaled model: {markered_osim.name}")
+        for body, f in personalize_report.scale_factors.items():
+            length = personalize_report.subject_lengths_m.get(body, 0.0)
+            print(f"   {body:14s}  ratio={f[0]:.4f}  subj_len={length:.4f}m")
+        print(f"   total mass: {personalize_report.total_mass_kg:.2f} kg")
+        print(f"   personalized model: {personalized_osim.name}")
+        markered_osim = personalize_report.scaled_model_path
 
     summary: dict = {
         "trial": str(args.c3d),
@@ -137,9 +144,15 @@ def main(argv: list[str] | None = None) -> int:
         "theia_version": list(trial.meta.theia_version),
         "filt_freq_hz": trial.meta.filt_freq_hz,
         "ik_lowpass_hz": cfg.filters.ik_lowpass_hz,
-        "scaled": bool(args.scale),
-        "subject_mass_kg": args.subject_mass_kg if args.scale else None,
-        "subject_height_m": args.subject_height_m if args.scale else None,
+        "personalized": personalize_report is not None,
+        "subject_mass_kg": personalize_report.subject_mass_kg if personalize_report else None,
+        "subject_height_m": personalize_report.subject_height_m if personalize_report else None,
+        "scale_factors": (
+            {b: list(f) for b, f in personalize_report.scale_factors.items()}
+            if personalize_report else {}
+        ),
+        "body_masses_kg": personalize_report.body_masses_kg if personalize_report else {},
+        "total_mass_kg": personalize_report.total_mass_kg if personalize_report else None,
         "recipes": {},
     }
 
