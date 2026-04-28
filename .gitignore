@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+
+# OpenSim run outputs
+out/
+*.log
+*.sto.tmp
+opensim.log
+
+# Built models (downloaded recipes are gitignored — they're large)
+data/models/recipes/
+data/models/*.osim
+data/ref/
+
+# Editor
+.vscode/
+.idea/
+*.swp
