@@ -1,0 +1,1013 @@
+! ==================================================================================================================
+!
+!------------------------------------------------DETERMINE SIDE + MORE QA---------------------------------------------
+!
+! ==================================================================================================================
+
+! --------------------------------------------------------------------------------
+! Define Parameters
+! --------------------------------------------------------------------------------
+
+! Define max external range 
+!	Maximum external shoulder rotation is defined from Release minus X frames
+Set_Pipeline_Parameter
+/PARAMETER_NAME=MAX_RANGE
+/PARAMETER_VALUE=50
+;
+
+! Define range to normalize the output
+!	Normalization Range is ( Max_Ext - START_NORMALIZATION_OFFSET ) to ( RELEASE + END_NORMALIZATION_OFFSET )
+Set_Pipeline_Parameter
+/PARAMETER_NAME=START_NORMALIZATION_OFFSET
+/PARAMETER_VALUE=75
+;
+
+! Define range to normalize the output
+!	Normalization Range is ( Max_Ext - START_NORMALIZATION_OFFSET ) to ( RELEASE + END_NORMALIZATION_OFFSET )
+Set_Pipeline_Parameter
+/PARAMETER_NAME=END_NORMALIZATION_OFFSET
+/PARAMETER_VALUE=65
+;
+
+! Define Required Events
+!	If these events aren't created, we're going to tag the trial as bad
+Set_Pipeline_Parameter
+/PARAMETER_NAME=EVENT_LIST
+/PARAMETER_VALUE=RAR_MIN+LAR_MIN+Release+FtStrike+START+END+RELEASE_MINUS_&::MAX_RANGE&+MAX_EXT
+;
+
+! --------------------------------------------------------------------------------
+! Clean File
+! --------------------------------------------------------------------------------
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+Event_Delete
+/EVENT_NAME=::EVENT_LIST
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /EVENT_INSTANCE=
+! /TIME=
+;
+
+! Max Knee Lift - Don't do QA on max knee lift, so specify it separate
+
+Event_Delete
+/EVENT_NAME=Max_Knee_Lift
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /EVENT_INSTANCE=
+! /TIME=
+;
+
+! ---------------------------------------------------------------------------------------------
+!	Define Start/End of Trial
+! ---------------------------------------------------------------------------------------------
+
+Event_Explicit
+/EVENT_NAME=START_OF_RECORDING
+/FRAME=2
+! /TIME=
+;
+
+Event_Explicit
+/EVENT_NAME=END
+/FRAME=EOF-1
+! /TIME=
+;
+
+Assign_Tags_To_Files
+/MOTION_FILE_NAMES=ALL_FILES
+/QUERY=EVENT_LABEL::ORIGINAL::END<0.1
+/TAGS=BAD+BAD_FILE
+;
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+! ---------------------------------------------------------------------------------------------
+!	Define Release & Create Right/Left Side Tags
+! ---------------------------------------------------------------------------------------------
+
+! oh shit this detects if the subject is L/R 
+! that's gas 
+
+Transform_Data_Coordinate_System
+/SIGNAL_TYPES=KINETIC_KINEMATIC
+/SIGNAL_FOLDER=LHA
+/SIGNAL_NAMES=DistEndVel
+! /FROM_SEGMENT_CS=LAB
+/TO_SEGMENT_CS=VLB
+/RESULT_TYPES=DERIVED
+/RESULT_FOLDERS=SIDE_TEST
+/RESULT_NAME=LHA_DistVel_vLab
+/APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+/ORIENTATION_ONLTRUE
+! /USE_DATA_RATE=FALSE
+;
+
+Transform_Data_Coordinate_System
+/SIGNAL_TYPES=KINETIC_KINEMATIC
+/SIGNAL_FOLDER=RHA
+/SIGNAL_NAMES=DistEndVel
+! /FROM_SEGMENT_CS=LAB
+/TO_SEGMENT_CS=VLB
+/RESULT_TYPES=DERIVED
+/RESULT_FOLDERS=SIDE_TEST
+/RESULT_NAME=RHA_DistVel_vLab
+/APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+/ORIENTATION_ONLTRUE
+! /USE_DATA_RATE=FALSE
+;
+
+Lowpass_Filter
+/SIGNAL_TYPES=DERIVED+DERIVED
+/SIGNAL_FOLDER=SIDE_TEST+SIDE_TEST
+/SIGNAL_NAMES=LHA_DistVel_vLab+RHA_DistVel_vLab
+/RESULT_FOLDER=SIDE_TEST
+/RESULT_SUFFIX=_FILT
+! /FILTER_CLASS=BUTTERWORTH
+/FREQUENCY_CUTOFF=20
+! /NUM_REFLECTED=6
+! /NUM_EXTRAPOLATED=0
+! /TOTAL_BUFFER_SIZE=6
+! /NUM_BIDIRECTIONAL_PASSES=1
+;
+
+Rectify
+/SIGNAL_TYPES=DERIVED
+/SIGNAL_FOLDER=SIDE_TEST
+/SIGNAL_NAMES=RHA_DistVel_vLab_Filt+LHA_DistVel_vLab_Filt
+/RESULT_TYPES=DERIVED
+/RESULT_FOLDERS=SIDE_TEST
+/RESULT_NAME=_ABS
+/APPLY_AS_SUFFIX_TO_SIGNAL_NAME=TRUE
+;
+
+! Release signal is those two combined where they are > 20 m/s
+Evaluate_Expression
+! /EXPRESSION=
+! ( DERIVED::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS::X > 15 ) * DERIVED::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS::X
+! +
+! ( DERIVED::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS::X > 15 ) * DERIVED::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS::X
+/EXPRESSION=
+!( DERIVED::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS::Y > 10 ) * DERIVED::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS::Y
+!+
+!( DERIVED::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS::Y > 10 ) * DERIVED::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS::Y
+( DERIVED::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS::Y > 12.5 ) * DERIVED::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS::Y
++
+( DERIVED::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS::Y > 12.5 ) * DERIVED::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS::Y
+! /SIGNAL_TYPES=
+! /SIGNAL_FOLDER=ORIGINAL
+! /SIGNAL_NAMES=
+! /RESULT_TYPES=DERIVED
+/RESULT_FOLDERS=SIDE_TEST
+/RESULT_NAME=Release_Signal
+! /APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+;
+
+! Create Start + 50 frames as the threshold for release
+Event_Copy
+ /EVENT_NAME=START_OF_RECORDING
+ /NEW_EVENT_NAME=START_PLUS100
+ /FRAME_OFFSET=100
+ ! /TIME_OFFSET=
+ ! /PERCENT_OFFSET=100
+ ! /EVENT_INSTANCE=0
+ ! /RANGE_INSTANCE=0
+ /EVENT_SEQUENCE=START_OF_RECORDING+END
+ ! /EXCLUDE_EVENTS=
+ ! /START_AT_EVENT=
+ ! /END_AT_EVENT=
+;
+
+! Release is 3 frames after peak hand speed
+Event_Maximum
+/RESULT_EVENT_NAME=Release
+/SIGNAL_TYPES=DERIVED
+/SIGNAL_FOLDER=SIDE_TEST
+/SIGNAL_NAMES=Release_Signal
+/SIGNAL_COMPONENTS=ALL
+/FRAME_OFFSET=3
+! /TIME_OFFSET=
+/EVENT_SEQUENCE=START_PLUS100+END
+! /EXCLUDE_EVENTS=START_PLUS50+END
+! /EVENT_SEQUENCE_INSTANCE=0
+! /EVENT_SUBSEQUENCE=
+! /SUBSEQUENCE_EXCLUDE_EVENTS=
+! /EVENT_SUBSEQUENCE_INSTANCE=0
+/EVENT_INSTANCE=1
+! /FRAME_WINDOW=8
+! /THRESHOLD=
+;
+
+Metric_Signal_Value_At_Event
+/SIGNAL_TYPES=DERIVED
+/SIGNAL_FOLDER=SIDE_TEST
+/SIGNAL_NAMES=LHA_DistVel_vLab_Filt_ABS+RHA_DistVel_vLab_Filt_ABS
+/RESULT_METRIC_FOLDER=SIDE_TEST+SIDE_TEST
+/RESULT_METRIC_NAME=_Release
+/APPLY_AS_SUFFIX_TO_SIGNAL_NAME=TRUE
+! /SIGNAL_COMPONENTS=
+! /COMPONENT_SEQUENCE=X
+/COMPONENT_SEQUENCE=Y
+/EVENT_NAME=Release
+! /GENERATE_MEAN_AND_STDDEV=TRUE
+! /APPEND_TO_EXISTING_VALUES=FALSE
+! /GENERATE_VECTOR_LENGTH_METRIC=FALSE
+! /RETAIN_NO_DATA_VALUES=FALSE
+;
+
+! Arm side is whichever hand speed at release is >
+Assign_Tags_To_Files
+/MOTION_FILE_NAMES=ALL_FILES
+/QUERY=((METRIC::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS_Release) > (METRIC::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS_Release))
+/TAGS=R
+;
+
+! Janky way to create the hand TEXT_DATA data GO 
+! NOTE: only creates it in the individual file (not in global)
+Conditional_Statement
+/ITERATION_PARAMETER_NAME=SIDE_COND
+/EXPRESSION=((METRIC::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS_Release) > (METRIC::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS_Release))
+! /AS_INTEGER=TRUE
+;
+	
+	Create_Text_Data
+	/SIGNAL_FOLDER=INFO
+	/SIGNAL_NAMES=HAND
+	/TEXT_DATA=R
+	/PROMPT_ON_EMPTY=FALSE
+	;
+	
+	Set_Pipeline_Parameter
+	/PARAMETER_NAME=HAND
+	/PARAMETER_VALUE=R
+	! /PARAMETER_VALUE_SEARCH_FOR=
+	! /PARAMETER_VALUE_REPLACE_WITH=
+	! /PARAMETER_VALUE_PREFIX=
+	! /PARAMETER_VALUE_APPEND=
+	! /MULTI_PASS=FALSE
+	;
+	
+	Select_Active_File
+	/FILE_NAME=GLOBAL
+	/QUERY=
+	;
+	
+	Create_Text_Data
+	/SIGNAL_FOLDER=INFO
+	/SIGNAL_NAMES=HAND
+	/TEXT_DATA=R
+	/PROMPT_ON_EMPTY=FALSE
+	;
+	
+	Select_Active_File
+	/FILE_NAME=ALL_FILES
+	/QUERY=
+	;
+
+Conditional_Statement_End
+/ITERATION_PARAMETER_NAME=SIDE_COND
+;
+
+Assign_Tags_To_Files
+/MOTION_FILE_NAMES=ALL_FILES
+/QUERY=((METRIC::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS_Release) < (METRIC::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS_Release))
+/TAGS=L
+;
+
+Conditional_Statement
+/ITERATION_PARAMETER_NAME=SIDE_COND
+/EXPRESSION=((METRIC::SIDE_TEST::RHA_DistVel_vLab_Filt_ABS_Release) < (METRIC::SIDE_TEST::LHA_DistVel_vLab_Filt_ABS_Release))
+! /AS_INTEGER=TRUE
+;
+
+	Create_Text_Data
+	/SIGNAL_FOLDER=INFO
+	/SIGNAL_NAMES=HAND
+	/TEXT_DATA=L
+	/PROMPT_ON_EMPTY=FALSE
+	;
+	
+	Set_Pipeline_Parameter
+	/PARAMETER_NAME=HAND
+	/PARAMETER_VALUE=L
+	! /PARAMETER_VALUE_SEARCH_FOR=
+	! /PARAMETER_VALUE_REPLACE_WITH=
+	! /PARAMETER_VALUE_PREFIX=
+	! /PARAMETER_VALUE_APPEND=
+	! /MULTI_PASS=FALSE
+	;
+	
+	Select_Active_File
+	/FILE_NAME=GLOBAL
+	/QUERY=
+	;
+	
+	Create_Text_Data
+	/SIGNAL_FOLDER=INFO
+	/SIGNAL_NAMES=HAND
+	/TEXT_DATA=L
+	/PROMPT_ON_EMPTY=FALSE
+	;
+	
+	Select_Active_File
+	/FILE_NAME=ALL_FILES
+	/QUERY=
+	;
+
+Conditional_Statement_End
+/ITERATION_PARAMETER_NAME=SIDE_COND
+;
+
+Event_Copy
+/EVENT_NAME=RELEASE
+/NEW_EVENT_NAME=RELEASE_MINUS_&::MAX_RANGE&
+! /EVENT_INSTANCE=0
+! /RANGE_INSTANCE=0
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /START_AT_EVENT=
+! /END_AT_EVENT=
+/FRAME_OFFSET=-&::MAX_RANGE&
+! /TIME_OFFSET=
+! /PERCENT_OFFSET=
+;
+
+Event_Copy
+/EVENT_NAME=RELEASE
+/NEW_EVENT_NAME=RELEASE_PLUS_30
+! /EVENT_INSTANCE=0
+! /RANGE_INSTANCE=0
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /START_AT_EVENT=
+! /END_AT_EVENT=
+/FRAME_OFFSET=30
+! /TIME_OFFSET=
+! /PERCENT_OFFSET=
+;
+
+! ---------------------------------------------------------------------------------------------
+! Find Minimum Value to Remove Discontinuities in Shoulder
+! ---------------------------------------------------------------------------------------------
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+Set_Pipeline_Parameter
+/PARAMETER_NAME=ELBOW_FLEX_LARGE
+/PARAMETER_VALUE=45
+! /PARAMETER_VALUE_SEARCH_FOR=
+! /PARAMETER_VALUE_REPLACE_WITH=
+! /PARAMETER_VALUE_PREFIX=
+! /PARAMETER_VALUE_APPEND=
+! /MULTI_PASS=FALSE
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=LFA_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=LFA
+/REFERENCE_SEGMENT=LAR
+/RESOLUTION_COORDINATE_SYSTEM=
+! /USE_CARDAN_SEQUENCE=FALSE
+! /NORMALIZATION=FALSE
+! /NORMALIZATION_METHOD=
+! /NORMALIZATION_METRIC=
+! /NEGATEX=FALSE
+! /NEGATEY=FALSE
+! /NEGATEZ=FALSE
+! /AXIS1=X
+! /AXIS2=Y
+! /AXIS3=Z
+! /TREADMILL_DATA=FALSE
+! /TREADMILL_DIRECTION=UNIT_VECTOR(0,1,0)
+! /TREADMILL_SPEED=0.0
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=RFA_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RFA
+/REFERENCE_SEGMENT=RAR
+/RESOLUTION_COORDINATE_SYSTEM=
+! /USE_CARDAN_SEQUENCE=FALSE
+! /NORMALIZATION=FALSE
+! /NORMALIZATION_METHOD=
+! /NORMALIZATION_METRIC=
+! /NEGATEX=FALSE
+! /NEGATEY=FALSE
+! /NEGATEZ=FALSE
+! /AXIS1=X
+! /AXIS2=Y
+! /AXIS3=Z
+! /TREADMILL_DATA=FALSE
+! /TREADMILL_DIRECTION=UNIT_VECTOR(0,1,0)
+! /TREADMILL_SPEED=0.0
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=LAR_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=LAR
+/REFERENCE_SEGMENT=RTA
+/RESOLUTION_COORDINATE_SYSTEM=
+! /USE_CARDAN_SEQUENCE=FALSE
+! /NORMALIZATION=FALSE
+! /NORMALIZATION_METHOD=
+! /NORMALIZATION_METRIC=
+! /NEGATEX=FALSE
+! /NEGATEY=FALSE
+/NEGATEZ=TRUE
+/AXIS1=Z
+! /AXIS2=Y
+! /AXIS3=Z
+! /TREADMILL_DATA=FALSE
+! /TREADMILL_DIRECTION=UNIT_VECTOR(0,1,0)
+! /TREADMILL_SPEED=0.0
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=RAR_Angle
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RAR
+/REFERENCE_SEGMENT=RTA
+/RESOLUTION_COORDINATE_SYSTEM=
+! /USE_CARDAN_SEQUENCE=FALSE
+! /NORMALIZATION=FALSE
+! /NORMALIZATION_METHOD=
+! /NORMALIZATION_METRIC=
+/NEGATEX=FALSE
+/NEGATEY=FALSE
+/NEGATEZ=FALSE
+/AXIS1=Z
+! /AXIS2=Y
+! /AXIS3=Z
+! /TREADMILL_DATA=FALSE
+! /TREADMILL_DIRECTION=UNIT_VECTOR(0,1,0)
+! /TREADMILL_SPEED=0.0
+;
+
+For_Each
+/ITERATION_PARAMETER_NAME=SIDE
+! /ITERATION_PARAMETER_COUNT_NAME=
+/ITEMS=R+L
+;
+
+	! Store Elbow Flexion Signal
+
+	Evaluate_Expression
+	/EXPRESSION=LINK_MODEL_BASED::ORIGINAL::&::SIDE&FA_ANGLE::X
+	! /SIGNAL_TYPES=
+	! /SIGNAL_FOLDER=ORIGINAL
+	! /SIGNAL_NAMES=
+	/RESULT_TYPES=DERIVED
+	/RESULT_FOLDERS=TRACKING
+	/RESULT_NAME=&::SIDE&FA_ANGLE_X_ORIG
+	! /APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+	;
+
+	! Just look at the shoulder Z for right now
+
+	Evaluate_Expression
+	/EXPRESSION=LINK_MODEL_BASED::ORIGINAL::&::SIDE&AR_ANGLE::Z
+	! /SIGNAL_TYPES=
+	! /SIGNAL_FOLDER=ORIGINAL
+	! /SIGNAL_NAMES=
+	/RESULT_TYPES=DERIVED
+	/RESULT_FOLDERS=TRACKING
+	/RESULT_NAME=&::SIDE&AR_ANGLE_Z_ORIG
+	! /APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+	;
+	
+	! If the elbow flexion angle is above the threshold, keep the value
+	!	If it's below the threshold, set the value to DATA_NOT_FOUND
+	
+	Evaluate_Expression
+	/EXPRESSION=
+	( ( DERIVED::TRACKING::&::SIDE&FA_ANGLE_X_ORIG > ( &::ELBOW_FLEX_LARGE&/57.3 ) ) /( DERIVED::TRACKING::&::SIDE&FA_ANGLE_X_ORIG > ( &::ELBOW_FLEX_LARGE&/57.3 ) ) )
+	* DERIVED::TRACKING::&::SIDE&AR_ANGLE_Z_ORIG
+	! /SIGNAL_TYPES=
+	! /SIGNAL_FOLDER=ORIGINAL
+	! /SIGNAL_NAMES=
+	! /RESULT_TYPES=DERIVED
+	/RESULT_FOLDERS=TRACKING
+	/RESULT_NAME=&::SIDE&AR_ANGLE_Z_TEST
+	! /APPLY_AS_SUFFIX_TO_SIGNAL_NAME=FALSE
+	;
+
+	Event_Global_Maximum
+	/RESULT_EVENT_NAME=&::SIDE&AR_MIN
+	/SIGNAL_TYPES=DERIVED
+	/SIGNAL_FOLDER=TRACKING
+	/SIGNAL_NAMES=&::SIDE&AR_ANGLE_Z_TEST
+	/SIGNAL_COMPONENTS=ALL
+	! /FRAME_OFFSET=0
+	! /TIME_OFFSET=
+	/EVENT_SEQUENCE=RELEASE_MINUS_&::MAX_RANGE&+RELEASE
+	! /EXCLUDE_EVENTS=
+	! /EVENT_SEQUENCE_INSTANCE=0
+	! /EVENT_SUBSEQUENCE=
+	! /SUBSEQUENCE_EXCLUDE_EVENTS=
+	! /EVENT_SUBSEQUENCE_INSTANCE=0
+	! /THRESHOLD=
+	;
+	
+End_For_Each
+/ITERATION_PARAMETER_NAME=SIDE
+;
+
+! ---------------------------------------------------------------------------------------------
+!	Define MAX_EXT
+! ---------------------------------------------------------------------------------------------
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT (BAD)
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=RShoulder_Angle_YXZ
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=RAR
+/REFERENCE_SEGMENT=RTA
+/RESOLUTION_COORDINATE_SYSTEM=
+! /USE_CARDAN_SEQUENCE=FALSE
+! /NORMALIZATION=FALSE
+! /NORMALIZATION_METHOD=
+! /NORMALIZATION_METRIC=
+! /NEGATEX=FALSE
+/NEGATEY=TRUE
+/NEGATEZ=TRUE
+/AXIS1=Y
+/AXIS2=X
+/AXIS3=Z
+! /TREADMILL_DATA=FALSE
+! /TREADMILL_DIRECTION=UNIT_VECTOR(0,1,0)
+! /TREADMILL_SPEED=0.0
+;
+
+Compute_Model_Based_Data
+/RESULT_NAME=LShoulder_Angle_YXZ
+/FUNCTION=JOINT_ANGLE
+/SEGMENT=LAR
+/REFERENCE_SEGMENT=RTA
+/RESOLUTION_COORDINATE_SYSTEM=
+! /USE_CARDAN_SEQUENCE=FALSE
+! /NORMALIZATION=FALSE
+! /NORMALIZATION_METHOD=
+! /NORMALIZATION_METRIC=
+/NEGATEX=TRUE
+! /NEGATEY=FALSE
+! /NEGATEZ=FALSE
+/AXIS1=Y
+/AXIS2=X
+/AXIS3=Z
+! /TREADMILL_DATA=FALSE
+! /TREADMILL_DIRECTION=UNIT_VECTOR(0,1,0)
+! /TREADMILL_SPEED=0.0
+;
+
+
+! Instead of a loop, let's just use the ::HAND parameter
+
+Select_Active_File
+/FILE_NAME=&::HAND&
+/QUERY=
+;
+
+Evaluate_Expression
+/EXPRESSION=RESOLVE_DISCONTINUITY(CURRENT_SIGNAL,360,EVENT_LABEL::ORIGINAL::&::HAND&AR_MIN)
+/SIGNAL_TYPES=LINK_MODEL_BASED
+! /SIGNAL_FOLDER=ORIGINAL
+/SIGNAL_NAMES=&::HAND&Shoulder_Angle_YXZ
+/RESULT_TYPES=DERIVED
+/RESULT_FOLDERS=MAX_EXT
+/RESULT_NAME=
+/APPLY_AS_SUFFIX_TO_SIGNAL_NAME=TRUE
+;
+
+Event_Global_Maximum
+/RESULT_EVENT_NAME=MAX_EXT
+/SIGNAL_TYPES=DERIVED
+/SIGNAL_FOLDER=MAX_EXT
+/SIGNAL_NAMES=&::HAND&Shoulder_Angle_YXZ
+/SIGNAL_COMPONENTS=Z
+/FRAME_OFFSET=0
+! /TIME_OFFSET=
+/EVENT_SEQUENCE=RELEASE_MINUS_&::MAX_RANGE&+Release
+! /EXCLUDE_EVENTS=
+! /EVENT_SEQUENCE_INSTANCE=0
+! /EVENT_SUBSEQUENCE=
+! /SUBSEQUENCE_EXCLUDE_EVENTS=
+! /EVENT_SUBSEQUENCE_INSTANCE=0
+! /THRESHOLD=
+;
+
+! For_Each
+! /ITERATION_PARAMETER_NAME=SIDE
+! ! /ITERATION_PARAMETER_COUNT_NAME=
+! /ITEMS=R+L
+! ;
+
+	! Select_Active_File
+	! /FILE_NAME=&::SIDE&
+	! /QUERY=
+	! ;
+
+	! Evaluate_Expression
+	! /EXPRESSION=RESOLVE_DISCONTINUITY(CURRENT_SIGNAL,360,EVENT_LABEL::ORIGINAL::&::SIDE&AR_MIN)
+	! /SIGNAL_TYPES=LINK_MODEL_BASED
+	! ! /SIGNAL_FOLDER=ORIGINAL
+	! /SIGNAL_NAMES=&::SIDE&Shoulder_Angle_YXZ
+	! /RESULT_TYPES=DERIVED
+	! /RESULT_FOLDERS=MAX_EXT
+	! /RESULT_NAME=
+	! /APPLY_AS_SUFFIX_TO_SIGNAL_NAME=TRUE
+	! ;
+		
+	! Event_Global_Maximum
+	! /RESULT_EVENT_NAME=MAX_EXT
+	! /SIGNAL_TYPES=DERIVED
+	! /SIGNAL_FOLDER=MAX_EXT
+	! /SIGNAL_NAMES=&::SIDE&Shoulder_Angle_YXZ
+	! /SIGNAL_COMPONENTS=Z
+	! /FRAME_OFFSET=0
+	! ! /TIME_OFFSET=
+	! /EVENT_SEQUENCE=RELEASE_MINUS_&::MAX_RANGE&+Release
+	! ! /EXCLUDE_EVENTS=
+	! ! /EVENT_SEQUENCE_INSTANCE=0
+	! ! /EVENT_SUBSEQUENCE=
+	! ! /SUBSEQUENCE_EXCLUDE_EVENTS=
+	! ! /EVENT_SUBSEQUENCE_INSTANCE=0
+	! ! /THRESHOLD=
+	! ;
+
+! End_For_Each
+! /ITERATION_PARAMETER_NAME=SIDE
+! ;
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+! ---------------------------------------------------------------------------------------------
+!	Define FtStrike
+! ---------------------------------------------------------------------------------------------
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=
+;
+
+Event_Copy
+/EVENT_NAME=MAX_EXT
+/NEW_EVENT_NAME=FtStrike
+! /EVENT_INSTANCE=0
+! /RANGE_INSTANCE=0
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /START_AT_EVENT=
+! /END_AT_EVENT=
+/FRAME_OFFSET=-35
+! /TIME_OFFSET=
+! /PERCENT_OFFSET=
+;
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+! ---------------------------------------------------------------------------------------------
+!	Set Normalization
+! ---------------------------------------------------------------------------------------------
+
+
+Event_Copy
+/EVENT_NAME=MAX_EXT
+/NEW_EVENT_NAME=START_NORM
+! /EVENT_INSTANCE=0
+! /RANGE_INSTANCE=0
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /START_AT_EVENT=
+! /END_AT_EVENT=
+/FRAME_OFFSET=-&::START_NORMALIZATION_OFFSET&
+! /TIME_OFFSET=
+! /PERCENT_OFFSET=
+;
+
+Event_Copy
+/EVENT_NAME=RELEASE
+/NEW_EVENT_NAME=END_NORM
+! /EVENT_INSTANCE=0
+! /RANGE_INSTANCE=0
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /START_AT_EVENT=
+! /END_AT_EVENT=
+/FRAME_OFFSET=&::END_NORMALIZATION_OFFSET&
+! /TIME_OFFSET=
+! /PERCENT_OFFSET=
+;
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+! /QUERY=
+;
+
+! ---------------------------------------------------------------------------------------------
+!	CREATE ACTUAL START EVENT THAT WE'LL USE 
+! ---------------------------------------------------------------------------------------------
+
+! Doing this to hopefully remove all the bullshit at the beginning of a take if PKH gets improperly tagged
+
+! Create an event that's 5 seconds before MAX_EXT 
+! If that doesn't exist then just set it to START_OF_RECORDING
+Event_Copy
+ /EVENT_NAME=MAX_EXT
+ /NEW_EVENT_NAME=START
+ /FRAME_OFFSET=-1800
+ ! /TIME_OFFSET=
+ ! /PERCENT_OFFSET=100
+ ! /EVENT_INSTANCE=0
+ ! /RANGE_INSTANCE=0
+ /EVENT_SEQUENCE=START_OF_RECORDING+END
+ ! /EXCLUDE_EVENTS=
+ ! /START_AT_EVENT=
+ ! /END_AT_EVENT=
+;
+
+! If PrePKH doesn't exist, use START 
+Conditional_Statement
+ /ITERATION_PARAMETER_NAME=PRE_MAX_EXT
+ /EXPRESSION=NOT(Data_Exists(EVENT_LABEL::ORIGINAL::START))
+ ! /AS_INTEGER=TRUE
+;
+
+	Event_Copy
+	 /EVENT_NAME=START_OF_RECORDING
+	 /NEW_EVENT_NAME=START
+	 /FRAME_OFFSET=0
+	 ! /TIME_OFFSET=
+	 ! /PERCENT_OFFSET=100
+	 ! /EVENT_INSTANCE=0
+	 ! /RANGE_INSTANCE=0
+	 ! /EVENT_SEQUENCE=START+END
+	 ! /EXCLUDE_EVENTS=
+	 ! /START_AT_EVENT=
+	 ! /END_AT_EVENT=
+	;
+
+
+Conditional_Statement_End
+ /ITERATION_PARAMETER_NAME=PRE_MAX_EXT
+;
+
+
+
+! ---------------------------------------------------------------------------------------------
+! Max Knee Lift
+!	 This event may not be part of the data collection, so we don't want to exclude trials if it's missing
+!		But we want to create metrics off of it, so we're going to put in
+! ---------------------------------------------------------------------------------------------
+
+Conditional_Statement
+/ITERATION_PARAMETER_NAME=SIDE_COND
+/EXPRESSION="&::HAND&" == "R"
+! /AS_INTEGER=TRUE
+;
+
+	Select_Active_File
+	/FILE_NAME=R
+	! /QUERY=
+	;
+
+	Event_Global_Maximum
+	/RESULT_EVENT_NAME=Max_Knee_Lift
+	/SIGNAL_TYPES=KINETIC_KINEMATIC
+	/SIGNAL_FOLDER=LSK
+	/SIGNAL_NAMES=ProxEndPos
+	/SIGNAL_COMPONENTS=Z
+	! /FRAME_OFFSET=0
+	! /TIME_OFFSET=
+	/EVENT_SEQUENCE=START+MAX_EXT
+	! /EXCLUDE_EVENTS=
+	! /EVENT_SEQUENCE_INSTANCE=0
+	! /EVENT_SUBSEQUENCE=
+	! /SUBSEQUENCE_EXCLUDE_EVENTS=
+	! /EVENT_SUBSEQUENCE_INSTANCE=0
+	! /EVENT_INSTANCE=0
+	! /FRAME_WINDOW=8
+	! /THRESHOLD=
+	;
+
+Conditional_Statement_End
+/ITERATION_PARAMETER_NAME=SIDE_COND
+;
+
+Conditional_Statement
+/ITERATION_PARAMETER_NAME=SIDE_COND
+/EXPRESSION="&::HAND&" == "L"
+! /AS_INTEGER=TRUE
+;
+
+	Select_Active_File
+	/FILE_NAME=L
+	! /QUERY=
+	;
+
+	Event_Global_Maximum
+	/RESULT_EVENT_NAME=Max_Knee_Lift
+	/SIGNAL_TYPES=KINETIC_KINEMATIC
+	/SIGNAL_FOLDER=RSK
+	/SIGNAL_NAMES=ProxEndPos
+	/SIGNAL_COMPONENTS=Z
+	! /FRAME_OFFSET=0
+	! /TIME_OFFSET=
+	/EVENT_SEQUENCE=START+MAX_EXT
+	! /EXCLUDE_EVENTS=
+	! /EVENT_SEQUENCE_INSTANCE=0
+	! /EVENT_SUBSEQUENCE=
+	! /SUBSEQUENCE_EXCLUDE_EVENTS=
+	! /EVENT_SUBSEQUENCE_INSTANCE=0
+	! /EVENT_INSTANCE=0
+	! /FRAME_WINDOW=8
+	! /THRESHOLD=
+	;
+
+Conditional_Statement_End
+/ITERATION_PARAMETER_NAME=SIDE_COND
+;
+
+! ---------------------------------------------------------------------------------------------
+! Tag "BAD" trials if events weren't created
+! ---------------------------------------------------------------------------------------------
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+For_Each
+/ITERATION_PARAMETER_NAME=CURRENT_EVENT
+! /ITERATION_PARAMETER_COUNT_NAME=
+/ITEMS=::EVENT_LIST
+;
+	
+	Assign_Tags_To_Files
+	/MOTION_FILE_NAMES=ALL_FILES
+	/QUERY=NOT(Data_Exists(EVENT_LABEL::ORIGINAL::&::CURRENT_EVENT&))
+	/TAGS=BAD
+	;
+	
+	! This information is saved out to the log file so the user knows what event failed
+	Assign_Tags_To_Files
+	/MOTION_FILE_NAMES=ALL_FILES
+	/QUERY=NOT(Data_Exists(EVENT_LABEL::ORIGINAL::&::CURRENT_EVENT&)) & NOT(BAD_FILE)
+	/TAGS=BAD_&::CURRENT_EVENT&
+	;	
+	
+End_For_Each
+/ITERATION_PARAMETER_NAME=CURRENT_EVENT
+;
+
+! ---------------------------------------------------------------------------------------------
+! Tag Bad Trials When the Hand Velocity hits an unrealistic value (>50 m/s)
+! ---------------------------------------------------------------------------------------------
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+/QUERY=NOT(BAD)
+;
+
+Event_Delete
+/EVENT_NAME=BAD_START+BAD_END
+! /EVENT_SEQUENCE=
+! /EXCLUDE_EVENTS=
+! /EVENT_INSTANCE=
+! /TIME=
+;
+
+! This means that the tracking went bad after release
+!	This is OK, but tag it in case there are issues in the future
+!	This usually happens when the pitcher walks out of the field of view at the end 
+
+Event_Threshold
+/RESULT_EVENT_NAME=BAD_END
+/SIGNAL_TYPES=DERIVED+DERIVED
+/SIGNAL_FOLDER=SIDE_TEST+SIDE_TEST
+/SIGNAL_NAMES=LHA_DistVel_vLab+RHA_DistVel_vLab
+/SIGNAL_COMPONENTS=X
+! /FRAME_OFFSET=0
+! /TIME_OFFSET=
+/EVENT_SEQUENCE=Release+END
+! /EXCLUDE_EVENTS=
+! /EVENT_SEQUENCE_INSTANCE=0
+! /EVENT_SUBSEQUENCE=
+! /SUBSEQUENCE_EXCLUDE_EVENTS=
+! /EVENT_SUBSEQUENCE_INSTANCE=0
+/EVENT_INSTANCE=1
+/THRESHOLD=50
+/ON_ASCENT=TRUE
+/ON_DESCENT=FALSE
+! /FRAME_WINDOW=8
+! /ENSURE_FRAMES_BEFORE=FALSE
+! /ENSURE_FRAMES_AFTER=FALSE
+;
+
+Assign_Tags_To_Files
+/MOTION_FILE_NAMES=ALL_FILES
+! /QUERY=NOT(ISNAN(EVENT_LABEL::ORIGINAL::BAD_END))
+/QUERY=Data_Exists(EVENT_LABEL::ORIGINAL::BAD_END)
+/TAGS=BAD_VEL_AT_END
+;
+
+! This means that the tracking went bad BEFORE release
+!	We do not want to include this
+
+Event_Threshold
+/RESULT_EVENT_NAME=BAD_START
+/SIGNAL_TYPES=DERIVED+DERIVED
+/SIGNAL_FOLDER=SIDE_TEST+SIDE_TEST
+/SIGNAL_NAMES=LHA_DistVel_vLab+RHA_DistVel_vLab
+/SIGNAL_COMPONENTS=X
+! /FRAME_OFFSET=0
+! /TIME_OFFSET=
+/EVENT_SEQUENCE=START+Release
+! /EXCLUDE_EVENTS=
+! /EVENT_SEQUENCE_INSTANCE=0
+! /EVENT_SUBSEQUENCE=
+! /SUBSEQUENCE_EXCLUDE_EVENTS=
+! /EVENT_SUBSEQUENCE_INSTANCE=0
+/EVENT_INSTANCE=1
+/THRESHOLD=50
+/ON_ASCENT=TRUE
+/ON_DESCENT=FALSE
+! /FRAME_WINDOW=8
+! /ENSURE_FRAMES_BEFORE=FALSE
+! /ENSURE_FRAMES_AFTER=FALSE
+;
+
+Assign_Tags_To_Files
+/MOTION_FILE_NAMES=ALL_FILES
+! /QUERY=NOT(ISNAN(EVENT_LABEL::ORIGINAL::BAD_START))
+/QUERY=Data_Exists(EVENT_LABEL::ORIGINAL::BAD_START)
+/TAGS=BAD
+;
+
+! This information is saved out to the log file so the user knows what event failed
+Assign_Tags_To_Files
+/MOTION_FILE_NAMES=ALL_FILES
+! /QUERY=NOT(ISNAN(EVENT_LABEL::ORIGINAL::BAD_START))
+/QUERY=Data_Exists(EVENT_LABEL::ORIGINAL::BAD_START)
+/TAGS=BAD_VEL_AT_START
+;
+
+
+! NOTE: MOVED TO SCRIPT 07
+! ! Create Text Data for all good files...
+! Select_Active_File
+! /FILE_NAME=ALL_FILES
+! /QUERY=NOT(BAD)
+! ;
+
+! Create_Text_Data
+! /SIGNAL_FOLDER=INFO
+! /SIGNAL_NAMES=QA
+! /TEXT_DATA=GOOD
+! /PROMPT_ON_EMPTY=FALSE
+! ;
+
+! ! And create Text Data for all bad files 
+! Select_Active_File
+! /FILE_NAME=ALL_FILES
+! /QUERY=BAD
+! ;
+
+! Create_Text_Data
+! /SIGNAL_FOLDER=INFO
+! /SIGNAL_NAMES=QA
+! /TEXT_DATA=BAD
+! /PROMPT_ON_EMPTY=FALSE
+! ;
+
+! Always Set the Active File Back to All_Files
+!	 This just ensures that the next script starts on All_Files
+!		in case the select active file command is forgotten in the next script
+
+Select_Active_File
+/FILE_NAME=ALL_FILES
+! /QUERY=
+;
