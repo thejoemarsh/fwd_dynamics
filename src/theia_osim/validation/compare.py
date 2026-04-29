@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ..analysis.body_kin import _read_sto
+from ..kinematics_postprocess.body_frame_corrections import convert_body_frame_signal
 from .load_v3d_json import V3DTrial, get_time_array, get_yabin_xyz
 
 
@@ -77,8 +78,14 @@ def compare_pelvis_omega(
     *,
     out_dir: Path | str,
     label: str = "recipe_a",
+    apply_frame_correction: bool = True,
 ) -> ComparisonReport:
-    """Plot V3D vs our OpenSim pelvis angular velocity overlay; report errors."""
+    """Plot V3D vs our OpenSim pelvis angular velocity overlay; report errors.
+
+    With `apply_frame_correction=True` (default), rotates OpenSim ω from the
+    OpenSim pelvis body frame into the V3D RPV frame before comparison
+    (180° about Z).
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -91,6 +98,8 @@ def compare_pelvis_omega(
 
     # Our side
     osim_t, osim_xyz = _read_pelvis_omega_local(osim_sto)
+    if apply_frame_correction:
+        osim_xyz = convert_body_frame_signal(osim_xyz, "pelvis")
 
     # Align onto a common time grid
     t_c, v3d_r, osim_r = _align_to_common_time(v3d_t, v3d_xyz, osim_t, osim_xyz)
@@ -106,7 +115,7 @@ def compare_pelvis_omega(
     # Plot
     overlay_png = out_dir / f"v3d_vs_{label}_pelvis_omega.png"
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
-    comp_labels = ["X", "Y", "Z (long axis — pelvis rotation)"]
+    comp_labels = ["X (anterior)", "Y (lateral)", "Z (long axis — pelvis rotation)"]
     for i, comp in enumerate(comp_labels):
         axes[i].plot(t_c, v3d_r[:, i], label="V3D", color="tab:orange", linewidth=2)
         axes[i].plot(
