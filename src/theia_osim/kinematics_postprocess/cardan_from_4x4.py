@@ -147,6 +147,42 @@ def _unwrap_deg(x: np.ndarray) -> np.ndarray:
     return np.degrees(np.unwrap(np.radians(x)))
 
 
+def _smart_unwrap_cardan_zxy(angles_T_x_3: np.ndarray) -> np.ndarray:
+    """Resolve gimbal-lock branch swaps in 3-DOF Cardan ZXY tracking.
+
+    Cardan ZXY has a 2-fold ambiguity:
+        (Z, X, Y)  ≡  (Z+180°, 180°−X, Y+180°)
+    represent the same rotation matrix. Near X = ±90° (gimbal lock) tracking
+    can flip branches between consecutive frames, producing simultaneous
+    ~180° jumps in Z and Y while X reflects around 90°. Per-component
+    np.unwrap can't detect this — both Z and Y appear to wrap legitimately.
+
+    Algorithm: at each frame i, evaluate both candidate branches against the
+    previously-unwrapped frame i−1; pick the branch with smaller squared
+    distance after handling per-component ±360° wraps.
+
+    Critical for the throwing-arm shoulder during late cocking → release
+    where arm_add_r reaches ~80° and excites the singularity.
+    """
+    n = angles_T_x_3.shape[0]
+    out = np.zeros_like(angles_T_x_3)
+    out[0] = angles_T_x_3[0]
+    for i in range(1, n):
+        std = angles_T_x_3[i]
+        alt = np.array([std[0] + 180.0, 180.0 - std[1], std[2] + 180.0])
+        # Wrap each to (-180, 180].
+        std_w = ((std + 180.0) % 360.0) - 180.0
+        alt_w = ((alt + 180.0) % 360.0) - 180.0
+        # For each candidate, pick the ±360°-shifted representative closest
+        # to out[i-1] component-by-component.
+        std_close = std_w + np.round((out[i - 1] - std_w) / 360.0) * 360.0
+        alt_close = alt_w + np.round((out[i - 1] - alt_w) / 360.0) * 360.0
+        d_std = float(np.sum((std_close - out[i - 1]) ** 2))
+        d_alt = float(np.sum((alt_close - out[i - 1]) ** 2))
+        out[i] = std_close if d_std <= d_alt else alt_close
+    return out
+
+
 def compute_coordinates(
     transforms_by_segment: dict[str, np.ndarray],
     sample_rate_hz: float,
@@ -196,20 +232,16 @@ def compute_coordinates(
             continue
 
         if jdef.kind == "free":
-            # Pelvis vs ground: rotation = pelvis world R, translation = pelvis world p
             R_rel = Rs["pelvis"]
-            # Cardan ZXY decomposition of R itself (parent is ground = identity)
-            angles_zxy = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
-            tilt, list_, rotation = (
-                angles_zxy[:, 0], angles_zxy[:, 1], angles_zxy[:, 2],
-            )
-            tx, ty, tz = ps["pelvis"][:, 0], ps["pelvis"][:, 1], ps["pelvis"][:, 2]
-            out[jdef.coords[0]] = tilt
-            out[jdef.coords[1]] = list_
-            out[jdef.coords[2]] = rotation
-            out[jdef.coords[3]] = tx
-            out[jdef.coords[4]] = ty
-            out[jdef.coords[5]] = tz
+            ang = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
+            if unwrap:
+                ang = _smart_unwrap_cardan_zxy(ang)
+            out[jdef.coords[0]] = ang[:, 0]
+            out[jdef.coords[1]] = ang[:, 1]
+            out[jdef.coords[2]] = ang[:, 2]
+            out[jdef.coords[3]] = ps["pelvis"][:, 0]
+            out[jdef.coords[4]] = ps["pelvis"][:, 1]
+            out[jdef.coords[5]] = ps["pelvis"][:, 2]
             continue
 
         if jdef.parent_body not in Rs or jdef.child_body not in Rs:
@@ -221,29 +253,25 @@ def compute_coordinates(
 
         if jdef.kind == "custom_zxy":
             ang = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
+            if unwrap:
+                ang = _smart_unwrap_cardan_zxy(ang)
             for i, c in enumerate(jdef.coords):
                 out[c] = ang[:, i]
         elif jdef.kind == "custom_zxy_l":
-            # acromial_l: axis2=-X, axis3=-Y → negate angles 1 and 2
+            # acromial_l: axis2=-X, axis3=-Y → negate angles 1 and 2 (after unwrap)
             ang = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
+            if unwrap:
+                ang = _smart_unwrap_cardan_zxy(ang)
             out[jdef.coords[0]] = ang[:, 0]
             out[jdef.coords[1]] = -ang[:, 1]
             out[jdef.coords[2]] = -ang[:, 2]
         elif jdef.kind in ("pin_x", "pin_y", "pin_z"):
-            # Project relative rotation onto the joint's primary axis.
             axis_idx = {"pin_x": 0, "pin_y": 1, "pin_z": 2}[jdef.kind]
             ang = Rotation.from_matrix(R_rel).as_euler("XYZ", degrees=True)
-            out[jdef.coords[0]] = ang[:, axis_idx]
-
-    # Unwrap rotational coordinates so BodyKinematics doesn't see 360° jumps.
-    if unwrap:
-        for col in list(out.keys()):
-            if col == "time":
-                continue
-            # Only unwrap rotational coords (translations are pelvis_tx/ty/tz).
-            if col in ("pelvis_tx", "pelvis_ty", "pelvis_tz"):
-                continue
-            out[col] = _unwrap_deg(np.asarray(out[col]))
+            arr = ang[:, axis_idx]
+            if unwrap:
+                arr = _unwrap_deg(arr)
+            out[jdef.coords[0]] = arr
 
     return pd.DataFrame(out)
 

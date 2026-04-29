@@ -24,6 +24,7 @@ def run_inverse_dynamics(
     *,
     lowpass_hz: float = 20.0,
     name: str = "inverse_dynamics",
+    exclude_muscles: bool = True,
 ) -> Path:
     """Run InverseDynamicsTool and write generalized-force .sto.
 
@@ -56,6 +57,10 @@ def run_inverse_dynamics(
     tool.setEndTime(t_end)
     tool.setResultsDir(str(out_dir))
     tool.setOutputGenForceFileName(out_sto.name)
+    if exclude_muscles:
+        excluded = osim.ArrayStr()
+        excluded.append("Muscles")
+        tool.setExcludedForces(excluded)
     setup_xml = out_dir / f"{name}_setup.xml"
     tool.printToXML(str(setup_xml))
 
