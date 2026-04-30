@@ -147,6 +147,19 @@ def _unwrap_deg(x: np.ndarray) -> np.ndarray:
     return np.degrees(np.unwrap(np.radians(x)))
 
 
+# Acromial joint shoulder Y-axis offset (radians). Set by the experimental
+# `LaiUhlrich2022_full_body_yroll60.osim` variant: both PhysicalOffsetFrames
+# of acromial_r and acromial_l carry an Ry(+60°) orientation, which moves the
+# Cardan ZXY middle-axis singularity off the throwing trajectory (peak |X|
+# drops 82.8° → 55.7° on pose_filt_0.c3d). When >0, we apply the matching
+# similarity transform to R_relative before ZXY decomposition so the .mot
+# coordinates target the rotated joint frames.
+#
+# Toggle via env var `ACROMIAL_Y_OFFSET_DEG` (default 0 = stock model).
+import os as _os
+ACROMIAL_Y_OFFSET_DEG: float = float(_os.environ.get("ACROMIAL_Y_OFFSET_DEG", "0"))
+
+
 def _smart_unwrap_cardan_zxy(angles_T_x_3: np.ndarray) -> np.ndarray:
     """Resolve gimbal-lock branch swaps in 3-DOF Cardan ZXY tracking.
 
@@ -250,6 +263,15 @@ def compute_coordinates(
             continue
 
         R_rel = _relative_rotation(Rs[jdef.parent_body], Rs[jdef.child_body])
+
+        # Acromial-only Ry(+α) offset to move gimbal lock off the throwing
+        # trajectory. Both parent_offset and child_offset of acromial_r/l in
+        # the matching .osim variant carry the same Ry(α) rotation; the joint's
+        # observed relative rotation in the new frames is the similarity
+        # transform R_off^T · R_rel · R_off.
+        if ACROMIAL_Y_OFFSET_DEG != 0.0 and joint_name.startswith("acromial_"):
+            R_off = Rotation.from_euler("y", ACROMIAL_Y_OFFSET_DEG, degrees=True).as_matrix()
+            R_rel = np.einsum("ji,njk,kl->nil", R_off, R_rel, R_off)
 
         if jdef.kind == "custom_zxy":
             ang = Rotation.from_matrix(R_rel).as_euler("ZXY", degrees=True)
