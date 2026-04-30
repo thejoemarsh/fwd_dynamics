@@ -17,6 +17,7 @@ replacement for IK output.
 """
 from __future__ import annotations
 
+import os as _os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,35 @@ import numpy as np
 import opensim as osim
 import pandas as pd
 from scipy.spatial.transform import Rotation
+
+
+# Acromial joint shoulder Y-axis offset (degrees). Set by the experimental
+# `LaiUhlrich2022_full_body_yroll60.osim` variant: both PhysicalOffsetFrames
+# of acromial_r and acromial_l carry an Ry(+60°) orientation, which moves the
+# Cardan ZXY middle-axis singularity off the throwing trajectory (peak |X|
+# drops 82.8° → 55.7° on pose_filt_0.c3d). When >0, we apply the matching
+# similarity transform to R_relative before ZXY decomposition so the .mot
+# coordinates target the rotated joint frames. Toggle via env var
+# `ACROMIAL_Y_OFFSET_DEG` (default 0 = stock model).
+ACROMIAL_Y_OFFSET_DEG: float = float(_os.environ.get("ACROMIAL_Y_OFFSET_DEG", "0"))
+
+# Shoulder parameterization (acromial_r/l rotation axis order). Default "ZXY"
+# matches the stock LaiUhlrich2022 model. Override via env var
+# `SHOULDER_PARAM` to test a different Cardan order — pair with the matching
+# .osim variant (built by scripts/build_cardan_variant.py).
+#
+# Note: OpenSim CustomJoint hard-rejects collinear axes (e.g. ZYZ Euler
+# raises `CustomJoint 'acromial_r' has collinear axes and are not well-defined`
+# at model load). So Euler sequences (1st axis == 3rd axis) like V3D's ZYZ
+# are NOT available within CustomJoint. Only the 6 Cardan permutations of
+# {X,Y,Z} are valid here.
+_VALID_CARDAN = {"ZXY", "ZYX", "XYZ", "XZY", "YXZ", "YZX"}
+SHOULDER_PARAM: str = _os.environ.get("SHOULDER_PARAM", "ZXY").upper()
+if SHOULDER_PARAM not in _VALID_CARDAN:
+    raise ValueError(
+        f"SHOULDER_PARAM={SHOULDER_PARAM!r} not in {sorted(_VALID_CARDAN)}. "
+        f"Euler sequences (e.g. ZYZ) are not supported by OpenSim CustomJoint."
+    )
 
 
 # Theia segment → OpenSim body name (skipping ones with no 4×4 source).
@@ -80,11 +110,24 @@ JOINT_DEFS: dict[str, JointDef] = {
         ("lumbar_extension", "lumbar_bending", "lumbar_rotation"), "custom_zxy"),
     "acromial_r": JointDef(
         "acromial_r", "torso", "humerus_r",
-        ("arm_flex_r", "arm_add_r", "arm_rot_r"), "custom_zxy"),
+        # Coord names track SHOULDER_PARAM. ZXY = stock LaiUhlrich names.
+        # XZY = anatomical-pitching labels (rotation1=X=abduction,
+        # rotation2=Z=horizontal abduction, rotation3=Y=internal rotation).
+        # Must match the .osim variant (built with `build_cardan_variant.py
+        # --rename-coords`).
+        ("shoulder_abd_r", "shoulder_hzn_r", "shoulder_int_rot_r")
+        if SHOULDER_PARAM == "XZY"
+        else ("arm_flex_r", "arm_add_r", "arm_rot_r"),
+        "custom_cardan" if SHOULDER_PARAM != "ZXY" else "custom_zxy"),
     "acromial_l": JointDef(
         "acromial_l", "torso", "humerus_l",
-        # L arm has sign-flipped X and Y axes; we negate after ZXY decompose
-        ("arm_flex_l", "arm_add_l", "arm_rot_l"), "custom_zxy_l"),
+        # L arm has sign-flipped X and Y axes when SHOULDER_PARAM=ZXY; for
+        # other orders the sign-flip semantics need re-derivation, so we
+        # treat them uniformly with R as a starting point.
+        ("shoulder_abd_l", "shoulder_hzn_l", "shoulder_int_rot_l")
+        if SHOULDER_PARAM == "XZY"
+        else ("arm_flex_l", "arm_add_l", "arm_rot_l"),
+        "custom_cardan" if SHOULDER_PARAM != "ZXY" else "custom_zxy_l"),
 
     # 1-DOF pin / coupled — use primary axis only
     # walker_knee is coupled; we treat as a single rotation about model-default
@@ -145,19 +188,6 @@ def _theia_to_opensim_world_R(R: np.ndarray) -> np.ndarray:
 def _unwrap_deg(x: np.ndarray) -> np.ndarray:
     """Unwrap an angular time series (in degrees) at 360° discontinuities."""
     return np.degrees(np.unwrap(np.radians(x)))
-
-
-# Acromial joint shoulder Y-axis offset (radians). Set by the experimental
-# `LaiUhlrich2022_full_body_yroll60.osim` variant: both PhysicalOffsetFrames
-# of acromial_r and acromial_l carry an Ry(+60°) orientation, which moves the
-# Cardan ZXY middle-axis singularity off the throwing trajectory (peak |X|
-# drops 82.8° → 55.7° on pose_filt_0.c3d). When >0, we apply the matching
-# similarity transform to R_relative before ZXY decomposition so the .mot
-# coordinates target the rotated joint frames.
-#
-# Toggle via env var `ACROMIAL_Y_OFFSET_DEG` (default 0 = stock model).
-import os as _os
-ACROMIAL_Y_OFFSET_DEG: float = float(_os.environ.get("ACROMIAL_Y_OFFSET_DEG", "0"))
 
 
 def _smart_unwrap_cardan_zxy(angles_T_x_3: np.ndarray) -> np.ndarray:
@@ -287,6 +317,18 @@ def compute_coordinates(
             out[jdef.coords[0]] = ang[:, 0]
             out[jdef.coords[1]] = -ang[:, 1]
             out[jdef.coords[2]] = -ang[:, 2]
+        elif jdef.kind == "custom_cardan":
+            # Generic Cardan sequence selected by SHOULDER_PARAM env var.
+            # All 6 Cardan permutations of {X,Y,Z} have a singularity at
+            # middle = ±90°, but the geometric value of β depends on the
+            # sequence. For the throwing trial: ZXY peaks β=82.8° (current,
+            # 7° from lock); XZY peaks 49° (41° margin); YXZ 82° (similar
+            # to ZXY); YZX 76°. See scripts/cardan_sweep.py for the table.
+            ang = Rotation.from_matrix(R_rel).as_euler(SHOULDER_PARAM, degrees=True)
+            if unwrap:
+                ang = np.column_stack([_unwrap_deg(ang[:, i]) for i in range(3)])
+            for i, c in enumerate(jdef.coords):
+                out[c] = ang[:, i]
         elif jdef.kind in ("pin_x", "pin_y", "pin_z"):
             axis_idx = {"pin_x": 0, "pin_y": 1, "pin_z": 2}[jdef.kind]
             ang = Rotation.from_matrix(R_rel).as_euler("XYZ", degrees=True)

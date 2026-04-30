@@ -282,12 +282,18 @@ def main(argv: list[str] | None = None) -> int:
     elbow = peak_in_window(jr_arr, jr_hdr,
                            "elbow_r_on_ulna_r_in_ulna_r", t_lo, t_hi)
 
-    # ID GenForces in the same window
+    # ID GenForces in the same window. Probe for either stock LaiUhlrich
+    # coord names (arm_flex_r etc.) or the XZY-anatomical variant
+    # (shoulder_abd_r etc.) so this works for both shoulder param choices.
     id_hdr, id_arr = read_sto(id_sto)
     id_peaks = {}
     mask = (id_arr[:, 0] >= t_lo) & (id_arr[:, 0] <= t_hi)
-    for c in ("arm_flex_r_moment", "arm_add_r_moment", "arm_rot_r_moment",
-              "elbow_flex_r_moment"):
+    candidate_cols = (
+        "arm_flex_r_moment", "arm_add_r_moment", "arm_rot_r_moment",
+        "shoulder_abd_r_moment", "shoulder_hzn_r_moment", "shoulder_int_rot_r_moment",
+        "elbow_flex_r_moment",
+    )
+    for c in candidate_cols:
         if c in id_hdr:
             v = id_arr[mask, id_hdr.index(c)]
             id_peaks[c] = float(np.abs(v).max())
