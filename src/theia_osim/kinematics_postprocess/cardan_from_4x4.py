@@ -36,10 +36,16 @@ from .filter import lowpass_filtfilt
 # and downstream kinetics 6-13×. A pre-ID lowpass on just these coords
 # crushes the spike before it propagates. Set THROWING_ARM_LOWPASS_HZ=0 to
 # disable. See scripts/fix_a_smooth_arm_coords.py for the diagnostic.
-THROWING_ARM_LOWPASS_HZ: float = float(_os.environ.get("THROWING_ARM_LOWPASS_HZ", "20"))
+THROWING_ARM_LOWPASS_HZ: float = float(_os.environ.get("THROWING_ARM_LOWPASS_HZ", "16"))
 THROWING_ARM_LOWPASS_COORDS: tuple[str, ...] = (
     "arm_flex_r", "arm_add_r", "arm_rot_r",
     "arm_flex_l", "arm_add_l", "arm_rot_l",
+    # H2 audit (2026-04-30) showed humerus_r ω ratio cleaned 1.30→1.05× after
+    # the original arm-only lowpass, but ulna_r and hand_r remained at 2.46×
+    # and 3.28× because elbow_flex_r was still spiking through gimbal lock.
+    # Extending the lowpass to elbow_flex_r should propagate the smoothing
+    # downstream of the elbow.
+    "elbow_flex_r", "elbow_flex_l",
 )
 
 
