@@ -26,6 +26,22 @@ import opensim as osim
 import pandas as pd
 from scipy.spatial.transform import Rotation
 
+from .filter import lowpass_filtfilt
+
+
+# Targeted lowpass on the throwing-arm Cardan coords. At gimbal lock
+# (arm_add_r ≈ ±90°), neither ZXY branch is smooth: arm_flex_r and arm_rot_r
+# jump ±50° in one frame even after smart-unwrap. ID's GCV spline turns that
+# into a ~10-frame q̈ pulse, which inflates body-frame ω 1.3-2.8× on the arm
+# and downstream kinetics 6-13×. A pre-ID lowpass on just these coords
+# crushes the spike before it propagates. Set THROWING_ARM_LOWPASS_HZ=0 to
+# disable. See scripts/fix_a_smooth_arm_coords.py for the diagnostic.
+THROWING_ARM_LOWPASS_HZ: float = float(_os.environ.get("THROWING_ARM_LOWPASS_HZ", "20"))
+THROWING_ARM_LOWPASS_COORDS: tuple[str, ...] = (
+    "arm_flex_r", "arm_add_r", "arm_rot_r",
+    "arm_flex_l", "arm_add_l", "arm_rot_l",
+)
+
 
 # Acromial joint shoulder Y-axis offset (degrees). Set by the experimental
 # `LaiUhlrich2022_full_body_yroll60.osim` variant: both PhysicalOffsetFrames
@@ -232,6 +248,7 @@ def compute_coordinates(
     *,
     osim_axis_swap: bool = True,
     unwrap: bool = True,
+    arm_lowpass_hz: float | None = None,
 ) -> pd.DataFrame:
     """Compute every OpenSim joint coordinate for every frame of the trial.
 
@@ -337,6 +354,15 @@ def compute_coordinates(
                 arr = _unwrap_deg(arr)
             out[jdef.coords[0]] = arr
 
+    cutoff = arm_lowpass_hz if arm_lowpass_hz is not None else THROWING_ARM_LOWPASS_HZ
+    if cutoff > 0:
+        for coord in THROWING_ARM_LOWPASS_COORDS:
+            if coord in out and out[coord].size >= 16:
+                out[coord] = lowpass_filtfilt(
+                    out[coord][:, None], cutoff_hz=cutoff,
+                    sample_rate_hz=sample_rate_hz, order=4,
+                ).ravel()
+
     return pd.DataFrame(out)
 
 
@@ -367,9 +393,11 @@ def write_recipe_d_mot(
     sample_rate_hz: float,
     *,
     osim_axis_swap: bool = True,
+    arm_lowpass_hz: float | None = None,
 ) -> Path:
     """End-to-end Path A: compute coords from Theia 4×4s + write OpenSim .mot."""
     coords = compute_coordinates(
-        transforms_by_segment, sample_rate_hz, osim_axis_swap=osim_axis_swap
+        transforms_by_segment, sample_rate_hz,
+        osim_axis_swap=osim_axis_swap, arm_lowpass_hz=arm_lowpass_hz,
     )
     return write_mot(coords, out_mot)
