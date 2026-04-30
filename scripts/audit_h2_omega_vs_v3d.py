@@ -35,8 +35,13 @@ from theia_osim.analysis.body_kin import (  # noqa: E402
     run_body_kinematics,
 )
 
-PERSONAL_OSIM = REPO / "out/repro_baseline/all_recipes/theia_pitching_personalized.osim"
-ANALYTICAL_MOT = REPO / "out/repro_baseline/all_recipes/recipe_d/analytical.mot"
+import os
+_REPRO_DIR = Path(os.environ.get(
+    "AUDIT_H2_REPRO_DIR",
+    str(REPO / "out/repro_baseline"),
+))
+PERSONAL_OSIM = _REPRO_DIR / "all_recipes/theia_pitching_personalized.osim"
+ANALYTICAL_MOT = _REPRO_DIR / "all_recipes/recipe_d/analytical.mot"
 PROCDB = REPO / "pose_filt_0_procdb.json"
 OUT = REPO / "out"
 BK_OUT = OUT / "audit_h2_body_kin"
