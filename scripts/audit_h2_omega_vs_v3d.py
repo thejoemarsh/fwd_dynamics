@@ -93,6 +93,14 @@ def main() -> None:
         df = read_body_velocities(bk["vel"], body)
         omega = np.column_stack([df["omega_x"], df["omega_y"], df["omega_z"]])
         # OpenSim BodyKinematics emits angular velocity in deg/s already.
+        # Pelvis sign convention: V3D and our pelvis frame disagree on the
+        # X and Y axis direction (verified visually 2026-05-01). Flip to
+        # match V3D so the overlay plots are meaningful.
+        if body == "pelvis":
+            omega[:, 0] *= -1.0
+            omega[:, 1] *= -1.0
+        elif body == "torso":
+            omega[:, 1] *= -1.0
         ours[body] = (df["time"].to_numpy(), omega)
 
     # --- load V3D
