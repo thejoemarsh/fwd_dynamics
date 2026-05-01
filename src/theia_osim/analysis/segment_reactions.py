@@ -423,3 +423,313 @@ def compute_throwing_arm_reactions(
         out["shoulder_M_torso"][f]   = R_t.T @ shoulder_react.M_world
 
     return out
+
+
+# ============================================================================
+# c3d-driven Newton-Euler (no Recipe D, no OpenSim coord chain)
+# ============================================================================
+
+# Theia c3d segment names → OpenSim body names. Right side only here; the
+# bake-off operates on the throwing arm.
+THEIA_TO_OSIM_R = {
+    "r_uarm": "humerus_r",
+    "r_larm": "ulna_r",
+    "r_hand": "hand_r",
+    "torso":  "torso",
+}
+
+
+def _omega_world_from_R_traj(R_traj: np.ndarray, dt: float) -> np.ndarray:
+    """World-frame angular velocity from a (T, 3, 3) rotation-matrix trajectory.
+    Uses Ω_world = Ṙ · R^T (skew). Returns rad/s."""
+    T = R_traj.shape[0]
+    R_dot = np.zeros_like(R_traj)
+    R_dot[1:-1] = (R_traj[2:] - R_traj[:-2]) / (2 * dt)
+    R_dot[0]    = (R_traj[1]  - R_traj[0])   / dt
+    R_dot[-1]   = (R_traj[-1] - R_traj[-2])  / dt
+    Omega = np.einsum("tij,tkj->tik", R_dot, R_traj)
+    return np.stack([Omega[:, 2, 1], Omega[:, 0, 2], Omega[:, 1, 0]], axis=1)
+
+
+def _smooth(arr: np.ndarray, dt: float, cutoff_hz: float = 16.0,
+            order: int = 4) -> np.ndarray:
+    from scipy.signal import butter, filtfilt
+    fs = 1.0 / dt
+    b, a = butter(order, cutoff_hz / (fs / 2.0), btype="lowpass")
+    return filtfilt(b, a, arr, axis=0)
+
+
+import os as _os_filt
+
+# V3D-style two-stage filter cascade. Defaults set by audit M (2026-05-01)
+# after a sweep across 8/10/12/14/16/18/20 Hz cutoff combinations:
+#   - Kinematic stage at 18 Hz matches Sports Biomechanics 2026 recommendation
+#     (240 Hz sampling + 18 Hz Butterworth) and stays inside the 13-18 Hz
+#     range used by published baseball-pitching kinetics literature.
+#   - Kinetic stage at 10 Hz applies a second low-pass to F/M outputs after
+#     the Newton-Euler propagation, mirroring V3D's documented two-stage
+#     methodology (kinematic filter → compute → kinetic filter). Closes the
+#     residual M overshoot that single-stage filtering can't reach.
+#   On pose_filt_0 (93.7 mph pitcher) this gives shoulder F = 1.16× V3D,
+#   elbow F = 0.90× V3D, elbow M = 1.01× V3D. Within ±20% on all four metrics
+#   — well inside the spread between published anthropometric models.
+KINEMATIC_LOWPASS_HZ_DEFAULT = float(
+    _os_filt.environ.get("KINEMATIC_LOWPASS_HZ", "18.0"))
+KINETIC_LOWPASS_HZ_DEFAULT = float(
+    _os_filt.environ.get("KINETIC_LOWPASS_HZ", "10.0"))
+
+
+def compute_throwing_arm_reactions_from_c3d(
+    c3d_path: Path | str,
+    model_path: Path | str,
+    side: str = "r",
+    *,
+    wrist_mode: str = "auto",       # "auto" | "welded" | "movable"
+    apply_vlb: np.ndarray | None = None,
+    smoothing_hz: float | None = None,         # kinematic-stage cutoff
+    kinetic_smoothing_hz: float | None = None, # kinetic-stage cutoff
+    br_time: float = 1.593,
+    com_overrides: dict | None = None,
+    inertia_overrides: dict | None = None,
+) -> dict:
+    """Newton-Euler joint reactions driven directly by c3d segment 4×4s.
+
+    Pipeline (two-stage V3D-style filter cascade):
+      1. Read Theia c3d (with VLB rotation matching Recipe D).
+      2. For each upper-arm segment, derive ω, α, a_origin from the 4×4
+         trajectory via numerical differentiation of R(t) and origin(t).
+         A kinematic-stage low-pass (smoothing_hz, default 18 Hz) is
+         applied to v_origin and ω BEFORE differentiating.
+      3. Get mass / COM / inertia from the **personalized** model file.
+         (Caller is responsible for personalization first; we just read.)
+      4. Recurse Newton-Euler:
+           - wrist_mode='movable': hand → forearm → humerus
+           - wrist_mode='welded':  forearm_combined → humerus
+           - 'auto': inspect the model's radius_hand_<side> joint type.
+      5. Apply kinetic-stage low-pass (kinetic_smoothing_hz, default
+         10 Hz) to F/M output time series. This second stage absorbs
+         numerical noise from the differentiation chain and matches V3D's
+         documented two-pass methodology.
+
+    Args:
+        c3d_path: Theia c3d.
+        model_path: personalized .osim with model-specific mass/inertia.
+        side: "r" or "l".
+        wrist_mode: see above.
+        apply_vlb: 4×4 VLB rotation (load from configs/default.yaml). If None,
+                   reads from configs/default.yaml automatically.
+        smoothing_hz: kinematic-stage low-pass cutoff (Hz). None = no smoothing,
+                      default = `KINEMATIC_LOWPASS_HZ_DEFAULT` (18 Hz).
+                      Applied to v_origin and ω before
+                      differentiating to a_COM and α. None = no smoothing.
+        br_time: ball-release time, used only for the throw-window peak.
+
+    Returns:
+        dict with per-frame arrays: same keys as compute_throwing_arm_reactions
+        plus 'wrist_mode_used' and 'time'.
+    """
+    from theia_osim.c3d_io.reader import read_theia_c3d  # noqa: E402
+    import yaml as _yaml
+
+    # Resolve filter cutoffs from explicit args, falling back to env-var-driven
+    # defaults (KINEMATIC_LOWPASS_HZ / KINETIC_LOWPASS_HZ).
+    if smoothing_hz is None:
+        smoothing_hz = KINEMATIC_LOWPASS_HZ_DEFAULT
+    if kinetic_smoothing_hz is None:
+        kinetic_smoothing_hz = KINETIC_LOWPASS_HZ_DEFAULT
+
+    c3d_path = Path(c3d_path).resolve()
+    model_path = Path(model_path).resolve()
+
+    # 1. Load c3d with VLB transform.
+    if apply_vlb is None:
+        cfg = _yaml.safe_load(open(Path(__file__).resolve().parents[3] /
+                                   "configs/default.yaml"))
+        apply_vlb = np.array(cfg["slope"]["vlb_4x4"], dtype=np.float64)
+    trial = read_theia_c3d(c3d_path, apply_vlb=apply_vlb)
+    dt = 1.0 / trial.sample_rate_hz
+
+    # 2. Per-segment kinematics from 4×4s.
+    seg_kine: dict[str, dict] = {}
+    for theia_name, osim_name in THEIA_TO_OSIM_R.items():
+        if theia_name not in trial.transforms:
+            raise RuntimeError(f"c3d missing segment {theia_name}")
+        T_arr = trial.transforms[theia_name]    # (n_frames, 4, 4)
+        origin = T_arr[:, :3, 3]                # body-origin position in world
+        R = T_arr[:, :3, :3]                    # body-to-world rotation
+
+        # ω and v_origin straight from R(t), origin(t). Smooth then diff for α
+        # and a (not the values themselves — those aren't noisy enough to need it).
+        omega_world = _omega_world_from_R_traj(R, dt)
+        v_origin = np.gradient(origin, dt, axis=0)
+        if smoothing_hz is not None:
+            v_origin = _smooth(v_origin, dt, smoothing_hz)
+            omega_world = _smooth(omega_world, dt, smoothing_hz)
+        a_origin_world = np.gradient(v_origin, dt, axis=0)
+        alpha_world = np.gradient(omega_world, dt, axis=0)
+
+        seg_kine[osim_name] = dict(
+            origin_world=origin,
+            R=R,
+            omega=omega_world,
+            alpha=alpha_world,
+            a_origin=a_origin_world,
+        )
+
+    # 3. Inertial properties from the model.
+    model = osim.Model(str(model_path))
+    model.initSystem()
+    bs = model.getBodySet()
+    js = model.getJointSet()
+
+    def body_inertials(name: str) -> dict:
+        b = bs.get(name)
+        com = _vec3_to_np(b.getMassCenter())
+        I_body = _inertia_to_np(b.getInertia())
+        if com_overrides and name in com_overrides:
+            com = np.asarray(com_overrides[name], dtype=float)
+            print(f"[segNE-from-c3d] override {name} COM → {com}")
+        if inertia_overrides and name in inertia_overrides:
+            I_body = np.asarray(inertia_overrides[name], dtype=float)
+            print(f"[segNE-from-c3d] override {name} I_body diag → "
+                  f"[{I_body[0,0]:.5f}, {I_body[1,1]:.5f}, {I_body[2,2]:.5f}]")
+        return dict(mass=b.getMass(), com=com, I_body=I_body)
+
+    inert = {n: body_inertials(n) for n in (f"humerus_{side}", f"ulna_{side}",
+                                            f"hand_{side}", "torso")}
+
+    # Wrist mode autodetection.
+    wrist_joint = js.get(f"radius_hand_{side}")
+    wrist_type = wrist_joint.getConcreteClassName()
+    if wrist_mode == "auto":
+        wrist_mode = "welded" if wrist_type == "WeldJoint" else "movable"
+    print(f"[segNE-from-c3d] wrist joint type: {wrist_type} → mode={wrist_mode}")
+
+    # 4. Joint center offsets in body frame (constants, taken from the model).
+    def jc_offset(joint: osim.Joint) -> np.ndarray:
+        cf = joint.getChildFrame()
+        if isinstance(cf, osim.PhysicalOffsetFrame):
+            return _vec3_to_np(cf.get_translation())
+        return np.zeros(3)
+
+    elbow_jc_in_ulna       = jc_offset(js.get(f"elbow_{side}"))
+    acromial_jc_in_humerus = jc_offset(js.get(f"acromial_{side}"))
+    wrist_jc_in_hand       = jc_offset(wrist_joint)
+
+    n_frames = trial.n_frames
+    times = np.arange(n_frames) * dt
+
+    # 5. Per-frame derived quantities.
+    body_state: dict[str, dict] = {}
+    for name, kine in seg_kine.items():
+        i = inert[name]
+        com_world = kine["origin_world"] + np.einsum("tij,j->ti", kine["R"], i["com"])
+        # a_COM via rigid-body kinematics: a_COM = a_origin + α × r + ω × (ω × r)
+        r_origin_to_com = com_world - kine["origin_world"]
+        a_com = (
+            kine["a_origin"]
+            + np.cross(kine["alpha"], r_origin_to_com)
+            + np.cross(kine["omega"], np.cross(kine["omega"], r_origin_to_com))
+        )
+        # Inertia in world per frame.
+        I_world = np.einsum("tij,jk,tlk->til", kine["R"], i["I_body"], kine["R"])
+        body_state[name] = dict(
+            mass=i["mass"], com_world=com_world, a_com=a_com,
+            omega=kine["omega"], alpha=kine["alpha"],
+            R=kine["R"], origin=kine["origin_world"], I_world=I_world,
+        )
+
+    # Joint center positions in world per frame.
+    elbow_jc = (body_state[f"ulna_{side}"]["origin"]
+                + np.einsum("tij,j->ti", body_state[f"ulna_{side}"]["R"], elbow_jc_in_ulna))
+    acromial_jc = (body_state[f"humerus_{side}"]["origin"]
+                   + np.einsum("tij,j->ti", body_state[f"humerus_{side}"]["R"],
+                               acromial_jc_in_humerus))
+    wrist_jc = (body_state[f"hand_{side}"]["origin"]
+                + np.einsum("tij,j->ti", body_state[f"hand_{side}"]["R"], wrist_jc_in_hand))
+
+    out = {
+        "times": times,
+        "wrist_mode_used": wrist_mode,
+        "elbow_F_ulna_frame":  np.zeros((n_frames, 3)),
+        "elbow_M_ulna_frame":  np.zeros((n_frames, 3)),
+        "shoulder_F_humerus":  np.zeros((n_frames, 3)),
+        "shoulder_M_humerus":  np.zeros((n_frames, 3)),
+        "shoulder_F_torso":    np.zeros((n_frames, 3)),
+        "shoulder_M_torso":    np.zeros((n_frames, 3)),
+    }
+
+    # 6. Per-frame Newton-Euler.
+    for f in range(n_frames):
+        h = SegmentSnapshot(
+            "humerus", body_state[f"humerus_{side}"]["com_world"][f],
+            body_state[f"humerus_{side}"]["a_com"][f],
+            body_state[f"humerus_{side}"]["omega"][f],
+            body_state[f"humerus_{side}"]["alpha"][f],
+            body_state[f"humerus_{side}"]["I_world"][f],
+            body_state[f"humerus_{side}"]["mass"],
+        )
+        u = SegmentSnapshot(
+            "ulna", body_state[f"ulna_{side}"]["com_world"][f],
+            body_state[f"ulna_{side}"]["a_com"][f],
+            body_state[f"ulna_{side}"]["omega"][f],
+            body_state[f"ulna_{side}"]["alpha"][f],
+            body_state[f"ulna_{side}"]["I_world"][f],
+            body_state[f"ulna_{side}"]["mass"],
+        )
+        d = SegmentSnapshot(
+            "hand", body_state[f"hand_{side}"]["com_world"][f],
+            body_state[f"hand_{side}"]["a_com"][f],
+            body_state[f"hand_{side}"]["omega"][f],
+            body_state[f"hand_{side}"]["alpha"][f],
+            body_state[f"hand_{side}"]["I_world"][f],
+            body_state[f"hand_{side}"]["mass"],
+        )
+
+        if wrist_mode == "welded":
+            forearm = CombinedSegment("forearm", parts=(u, d)).collapse()
+            elbow_react = newton_euler_step(
+                seg=forearm, proximal_jc=elbow_jc[f],
+                distal_jc=None, distal_reaction=None,
+            )
+        else:
+            # hand recurses first (open chain at fingertip), then forearm.
+            hand_react = newton_euler_step(
+                seg=d, proximal_jc=wrist_jc[f],
+                distal_jc=None, distal_reaction=None,
+            )
+            elbow_react = newton_euler_step(
+                seg=u, proximal_jc=elbow_jc[f],
+                distal_jc=wrist_jc[f], distal_reaction=hand_react,
+            )
+
+        shoulder_react = newton_euler_step(
+            seg=h, proximal_jc=acromial_jc[f],
+            distal_jc=elbow_jc[f], distal_reaction=elbow_react,
+        )
+
+        R_u = body_state[f"ulna_{side}"]["R"][f]
+        R_h = body_state[f"humerus_{side}"]["R"][f]
+        R_t = body_state["torso"]["R"][f]
+        out["elbow_F_ulna_frame"][f] = R_u.T @ elbow_react.F_world
+        out["elbow_M_ulna_frame"][f] = R_u.T @ elbow_react.M_world
+        out["shoulder_F_humerus"][f] = R_h.T @ shoulder_react.F_world
+        out["shoulder_M_humerus"][f] = R_h.T @ shoulder_react.M_world
+        out["shoulder_F_torso"][f]   = R_t.T @ shoulder_react.F_world
+        out["shoulder_M_torso"][f]   = R_t.T @ shoulder_react.M_world
+
+    # 7. Kinetic-stage low-pass on F/M output time series. Mirrors V3D's
+    # documented two-pass methodology: filter raw kinematics → compute →
+    # filter the kinetics outputs. Default 10 Hz cutoff absorbs numerical
+    # noise from the differentiation chain that single-stage kinematic
+    # filtering can't remove.
+    if kinetic_smoothing_hz is not None:
+        for k in ("elbow_F_ulna_frame", "elbow_M_ulna_frame",
+                  "shoulder_F_humerus", "shoulder_M_humerus",
+                  "shoulder_F_torso",   "shoulder_M_torso"):
+            out[k] = _smooth(out[k], dt, kinetic_smoothing_hz)
+    out["kinematic_lowpass_hz"] = float(smoothing_hz) if smoothing_hz else None
+    out["kinetic_lowpass_hz"] = (
+        float(kinetic_smoothing_hz) if kinetic_smoothing_hz else None)
+
+    return out

@@ -1,0 +1,59 @@
+{
+  "_doc": "Body-segment mass fractions used by V3D's HYBRID_SEGMENT model in theia_model.mdh. Each /MASS parameter is a fraction of total subject mass. The MDH file leaves /MASS commented out (! /MASS=) so V3D applies these defaults internally; values supplied by Joe Marsh on 2026-05-01. Cross-checked sum = 0.9987 (within rounding).",
+  "subject": {
+    "mass_kg_from_mdh": 89.8128,
+    "mass_kg_user_quoted": 89.128,
+    "_note": "MDH (theia_model.mdh line 18) lists 89.8128 kg; user-quoted 89.128 kg appears to be a transcription typo. Use mass_kg_from_mdh for any computation against this trial.",
+    "height_m": 1.8796
+  },
+  "mass_fractions": {
+    "pelvis":    0.1117,
+    "thigh":     0.1416,
+    "shank":     0.0465,
+    "foot":      0.0145,
+    "toes":      0.0004,
+    "thorax":    0.3000,
+    "head":      0.0810,
+    "upper_arm": 0.0280,
+    "forearm":   0.0160,
+    "hand":      0.0060
+  },
+  "v3d_segment_to_fraction": {
+    "_doc": "V3D segment names → mass-fraction key in this file. RAR=right arm, LAR=left arm, RFA=right forearm, LFA=left forearm, RHA=right hand, LHA=left hand, RTA/LTA=right/left thigh, etc. RTX=thorax.",
+    "PELVIS":    "pelvis",
+    "RTA":       "thigh",
+    "LTA":       "thigh",
+    "RSK":       "shank",
+    "LSK":       "shank",
+    "RFT":       "foot",
+    "LFT":       "foot",
+    "RTO":       "toes",
+    "LTO":       "toes",
+    "RTX":       "thorax",
+    "HEAD":      "head",
+    "RAR":       "upper_arm",
+    "LAR":       "upper_arm",
+    "RFA":       "forearm",
+    "LFA":       "forearm",
+    "RHA":       "hand",
+    "LHA":       "hand"
+  },
+  "computed_for_subject": {
+    "_doc": "Mass in kg for THIS subject (89.8128 kg) at each segment.",
+    "pelvis":    10.0317,
+    "thigh":     12.7174,
+    "shank":      4.1763,
+    "foot":       1.3023,
+    "toes":       0.0359,
+    "thorax":    26.9438,
+    "head":       7.2748,
+    "upper_arm":  2.5148,
+    "forearm":    1.4370,
+    "hand":       0.5389
+  },
+  "fraction_sum_check": {
+    "sum_with_two_sided_segments": 0.9987,
+    "missing_fraction": 0.0013,
+    "_note": "Sum of (1×pelvis + 2×thigh + 2×shank + 2×foot + 2×toes + 1×thorax + 1×head + 2×upper_arm + 2×forearm + 2×hand) = 0.9987. ~0.13% missing — likely rounding."
+  }
+}
